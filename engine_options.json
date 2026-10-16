@@ -1,0 +1,11 @@
+{
+  "initial_ocr": {
+    "skip_keys": [],
+    "sampling_size": 10,
+    "use_gpu": true
+  },
+  "post_ocr": {
+    "fps": 10,
+    "trim_to_breath": true
+  }
+}
