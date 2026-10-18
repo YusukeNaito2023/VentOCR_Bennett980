@@ -21,14 +21,14 @@ from tqdm import tqdm
 from easyocr import Reader
 from . import Settings
 from . import ExtractWaves as ew
-from .detect_sweep import read_frame, to_reference_size
+from .detect_sweep import read_frame, to_reference_size, source_scale, detect_sweep_x_img
 import cv2
 import re
 import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "1.3.1"
+ENGINE_VERSION = "1.3.2"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -226,10 +226,15 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 "BM_C_End": 0.0,
                 "BM_S_Start": 0.0,
                 "BM_S_End": 0.0,
+                "Sweep_X": np.nan,  # ペン先（捜査線）の x（元の動画の画素）。アプリのキャプチャーの走査線に使う。検出できなければ空
             }
 
+            scale = source_scale(color_frame)
             color_frame = to_reference_size(color_frame)  # 1280x720 などは 3840x2160 に拡大して 4K の座標で読む
             if color_frame is not None:
+                sweep_x = detect_sweep_x_img(color_frame)
+                if sweep_x > 0:
+                    row["Sweep_X"] = round(sweep_x * scale, 1)
 
                 if frame_shape is None:
                     frame_shape = color_frame.shape

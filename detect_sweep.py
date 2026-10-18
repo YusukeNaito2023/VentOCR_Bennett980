@@ -58,9 +58,24 @@ def to_reference_size(img):
     if img is None:
         return None
     h, w = img.shape[:2]
-    if (w, h) == (REF_W, REF_H) or abs(w * REF_H - h * REF_W) > 0.01 * w * REF_H:
+    if to_reference_size_factor(w, h) == 1.0:
         return img
     return cv2.resize(img, (REF_W, REF_H), interpolation=cv2.INTER_CUBIC)
+
+
+def source_scale(img):
+    """元のフレームの画素 / 3840x2160 にそろえたフレームの画素（to_reference_size で拡大しないものは 1）。
+    エンジンが書き出す画素の値（Sweep_X・Sweep_Start など）は、これを掛けて元の動画の画素に戻す（アプリは元の動画の幅で位置を出す）。"""
+    if img is None:
+        return 1.0
+    return to_reference_size_factor(img.shape[1], img.shape[0])
+
+
+def to_reference_size_factor(w, h):
+    """幅 w・高さ h のフレームを to_reference_size で 3840x2160 にするときの、元 / 拡大後 の比（拡大しないものは 1）。"""
+    if (w, h) == (REF_W, REF_H) or abs(w * REF_H - h * REF_W) > 0.01 * w * REF_H:
+        return 1.0
+    return w / REF_W
 
 
 def read_frame(frame_path):
@@ -78,16 +93,25 @@ def detect_sweep_x(frame_path):
     Returns:
         int: 捜査線の開始X座標（絶対座標）。検出不可時は0。
     """
-    img = read_frame(frame_path)
-    if img is None:
+    return detect_sweep_x_img(read_frame(frame_path))
+
+
+# 3つの波形ROIを含む帯（HSV への変換をこの範囲だけにする）
+_BAND_Y0 = min(ry for _, ry, _ in ROIS)
+_BAND_Y1 = max(ry + rh for _, ry, rh in ROIS)
+
+
+def detect_sweep_x_img(img):
+    """3840x2160 にそろえたフレーム（BGR）から捜査線のX位置を検出する（detect_sweep_x と同じ。検出不可時は0）。"""
+    if img is None or img.shape[0] < _BAND_Y1 or img.shape[1] < ROI_X + ROI_W:
         return 0
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    band = cv2.cvtColor(img[_BAND_Y0:_BAND_Y1, ROI_X:ROI_X + ROI_W], cv2.COLOR_BGR2HSV)
 
     # 全ROIで「グリッド除外V_max <= 閾値」の列を計算
     low_vmax = np.ones(ROI_W, dtype=bool)
     for name, ry, rh in ROIS:
-        roi = hsv[ry:ry+rh, ROI_X:ROI_X+ROI_W]
+        roi = band[ry - _BAND_Y0:ry - _BAND_Y0 + rh]
 
         # 異常フレーム判定: 各ROIで波形が最低100列必要
         wave = (
@@ -144,7 +168,7 @@ def detect_sweep_x(frame_path):
         for gs, ge, width in valid:
             left_region = []
             for name, ry, rh in ROIS:
-                roi = hsv[ry:ry+rh, ROI_X:ROI_X+ROI_W]
+                roi = band[ry - _BAND_Y0:ry - _BAND_Y0 + rh]
                 grid_mask = (roi[:, :, 0] >= GRID_H_MIN) & (roi[:, :, 0] <= GRID_H_MAX)
                 v_ch = roi[:, :, 2].copy()
                 v_ch[grid_mask] = 0

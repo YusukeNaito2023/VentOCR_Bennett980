@@ -53,12 +53,14 @@ MIN_GAP = 30
 # the breath is considered Fragmented
 FRAGMENT_EDGE_MARGIN = 20
 
-# 新しい画面（右端に届いた後、次の吸気で左端から描き直す画面）の描き始めの余白（ROI幅に対する割合）。
-# PB980 は新しい画面を吸気の約0.57秒前から描くため、ROI左端から切り出すと前の呼吸の呼気が頭に付く。
-# sample.mp4（4K, 6秒/画面）で吸気の立ち上がりは常に ROI左端+274〜278px。
-# 他の呼吸（開始フレームの sweep 位置から切り出す）は立ち上がりの平均約70px手前から始まるので、
-# それに揃えて ROI左端+206px（2877px の 7.16%）から切り出す。
-NEW_SCREEN_LEAD_IN_RATIO = 0.0716
+# 新しい画面（右端に届いた後、次の吸気で左端から描き直す画面）の最初の呼吸は、ROI左端から切り出し、
+# trim_to_breath（_snap_to_breaths）で吸気の始まりへ合わせる。PB980 は新しい画面を吸気の約0.57秒前から描く。
+# trim_to_breath が OFF のときだけ、描き始めの余白を秒で決めて ROI左端+余白から切り出す
+# （sample.mp4（4K, 6秒/画面 = 479.5px/秒）で 206px。以前は ROI 幅の 7.16% で、1画面 24 秒の動画では 1.7 秒になり吸気が抜けていた）。
+NEW_SCREEN_LEAD_IN_SEC = 0.43
+# 開始フレームの sweep_x が ROI左端からこの時間以内で、前の呼吸と同じ画面でなければ、新しい画面の最初の呼吸とみなす
+# （開始フレームではもう吸気が始まっているので、sweep_x から切り出すと立ち上がりの足元が欠ける）
+NEW_SCREEN_MAX_SEC = 1.0
 
 # Sweep line検出閾値（HSV）
 # マーカーは明るい黄橙色の縦線としてPressure/Flow/Volume全ROIに出現
@@ -823,6 +825,28 @@ def _snap_to_breaths(items):
     return items
 
 
+def _sweep_rate_from_frames(frames, fps, src_scale):
+    """Frames.csv の Sweep_X（元の動画の画素）の、隣のフレームとの進み方の中央値から掃引の速さ（4K の px/秒）。求められなければ None。"""
+    if "Sweep_X" not in frames.columns:
+        return None
+    f = frames[["Frame", "Sweep_X"]].apply(pd.to_numeric, errors="coerce").sort_values("Frame")
+    dx, dfr = f["Sweep_X"].diff().to_numpy(), f["Frame"].diff().to_numpy()
+    ok = np.isfinite(dx) & (dfr == 1) & (dx > 0)   # 折り返し（負）と検出できなかったフレームは使わない
+    if ok.sum() < 10:
+        return None
+    return float(np.median(dx[ok])) * fps / src_scale
+
+
+def _to_source_px(df, scale):
+    """4K の画素ごとの行の波形を、元の動画の画素ごとの行に間引く（scale = 元 / 4K。1 ならそのまま）。
+    拡大したフレームの行は補間で作ったもので、元の動画で見分けられるのは元の画素の単位まで。"""
+    if scale >= 1.0 or len(df) == 0:
+        return df
+    n = max(1, int(np.ceil(len(df) * scale)))
+    idx = np.minimum(np.round(np.arange(n) / scale).astype(int), len(df) - 1)
+    return df.iloc[idx].reset_index(drop=True)
+
+
 def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=False):
     """
     捜査線ベースで1呼吸分の波形CSVを生成する。
@@ -830,8 +854,9 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     開始/終了フレームの捜査線位置で4パターンに分類:
       パターン1: 開始=0, 終了=0 → 異常フレーム（Abnormal）、スキップ
       パターン2: 開始>0, 終了=0 → 右端で見切れ（Fragmented）。1.3.0: 開始はパターン4と同じく前の呼吸の続きから
-      パターン3: 開始=0, 終了>0 → 新しい画面の最初の呼吸。ROI左端＋描き始めの余白
-                 （NEW_SCREEN_LEAD_IN_RATIO）～終了sweep_xを「終了フレーム」で解析
+      パターン3: 開始=0, 終了>0 → 新しい画面の最初の呼吸。ROI左端（trim_to_breath が OFF なら＋描き始めの余白
+                 NEW_SCREEN_LEAD_IN_SEC）～終了sweep_xを「終了フレーム」で解析。1.3.2: 開始の sweep_x が左端の近くにある
+                 新しい画面の最初の呼吸（パターン4）も同じ左端から
       パターン4: 開始>0, 終了>0 → 開始sweep_x～終了sweep_xを「終了フレーム」で解析
                  1.3.0: 開始は「前の呼吸の最後のフレームの sweep_x の次の列」から（以前は開始フレームの sweep_x からで、
                  呼吸の間の 1 フレーム分（約 0.1 秒）の波形がどの呼吸にも入っていなかった）
@@ -850,7 +875,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     Returns:
         (effective_breaths_count, breaths)
     """
-    from .detect_sweep import detect_sweep_x, is_settings_screen, read_frame
+    from .detect_sweep import detect_sweep_x, is_settings_screen, read_frame, to_reference_size, source_scale
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -876,7 +901,10 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
 
     # ROI左端（パターン3で使用）
     sample_path = os.path.join(frames_root, f"frame_{int(frames['Frame'].iloc[0]):08d}.jpg")
-    sample_img = read_frame(sample_path)
+    sample_raw = cv2.imread(sample_path)
+    sample_img = to_reference_size(sample_raw)
+    # 元の動画の画素 / 4K の画素。書き出す画素の値（Sweep・Region・Wave_Rate・波形の行）は元の動画の画素に戻す
+    src_scale = source_scale(sample_raw)
     if sample_img is not None:
         rois = _get_waveform_rois(sample_img.shape)
         roi_x_left = max(rx for rx, ry, rw, rh in rois.values())
@@ -884,6 +912,11 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     else:
         roi_x_left = 520
         roi_x_right = 520 + 2877
+
+    # 新しい画面の最初の呼吸の切り出しに使う掃引の速さ（4K の px/秒）。Pass 1 のフレームごとの Sweep_X の進み方から
+    early_rate = _sweep_rate_from_frames(frames, fps, src_scale) or SWEEP_RATE_DEFAULT
+    trim_on = (_config or {}).get("post_ocr", {}).get("trim_to_breath", True)
+    new_screen_left = roi_x_left if trim_on else roi_x_left + int(round(NEW_SCREEN_LEAD_IN_SEC * early_rate))
 
     # 波形データなしの場合に空CSVを書き出すヘルパー
     def _write_empty_csv(path):
@@ -922,14 +955,23 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         sweep_start = detect_sweep_x(start_path)
         sweep_end = detect_sweep_x(end_path)
 
-        def _left_from_previous(x_left):
-            """前の呼吸の最後のフレーム（= 開始フレームの1つ前）の sweep_x の次の列（同じ画面のときだけ）。
-            呼吸の間の 1 フレーム分の抜けを無くす。前の呼吸で検出済みの値を使う。"""
+        def _previous_sweep():
+            """前の呼吸の最後のフレーム（= 開始フレームの1つ前）の sweep_x。前の呼吸で検出済みの値を使う。"""
             prev_end = sweep_end_map.get(breath_numbers[i - 1]) if i > 0 and prev_end_frame == start_frame_num - 1 else None
             if prev_end is None:
                 prev_path = os.path.join(frames_root, f"frame_{start_frame_num - 1:08d}.jpg")
-                prev_end = detect_sweep_x(prev_path) if os.path.exists(prev_path) else 0
-            return prev_end + 1 if 0 < prev_end < x_left else x_left
+                prev_end = detect_sweep_x(prev_path) if os.path.isfile(prev_path) else 0  # engine_api 3 では isfile で確かめる
+            return prev_end
+
+        def _left_from_previous(x_left):
+            """前の呼吸の最後のフレームの sweep_x の次の列（同じ画面のときだけ）。呼吸の間の 1 フレーム分の抜けを無くす。
+            新しい画面の最初の呼吸（開始フレームの sweep_x が左端の近くで、前の呼吸と同じ画面でない）は new_screen_left から。"""
+            prev_end = _previous_sweep()
+            if 0 < prev_end < x_left:
+                return prev_end + 1
+            if x_left - roi_x_left <= NEW_SCREEN_MAX_SEC * early_rate:
+                return min(new_screen_left, x_left)
+            return x_left
 
         sweep_start_map[bn] = sweep_start
         sweep_end_map[bn] = sweep_end
@@ -962,8 +1004,8 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
             fragmented_flags[bn] = True
             alert_reasons.append("Fragment")
         elif sweep_start == 0 and sweep_end > 0:
-            # パターン3: 新しい画面の最初の呼吸。ROI左端＋描き始めの余白～終了sweep_xを終了フレームで解析
-            x_left = roi_x_left + int(round((roi_x_right - roi_x_left) * NEW_SCREEN_LEAD_IN_RATIO))
+            # パターン3: 新しい画面の最初の呼吸。ROI左端（trim_to_breath が OFF なら＋描き始めの余白）～終了sweep_xを終了フレームで解析
+            x_left = new_screen_left
             if x_left >= sweep_end:
                 x_left = roi_x_left
             x_right = sweep_end
@@ -1067,10 +1109,11 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         df = rec["df"] if it["wave"] is None else it["wave"]
         t0 = wave_time[rec["breath"]] if it["wave"] is None else it["t0"]
         r = rate if it["wave"] is None else it["rate"]
-        df = df.copy()
+        df = _to_source_px(df, src_scale).copy()   # 行・速さ・動かした点の数は元の動画の画素で
         df["X"] = np.arange(1, len(df) + 1)
         df.to_csv(rec["path"], index=False)
-        wave_info[rec["breath"]] = (round(t0, 4), round(r, 4), it.get("trim_head", 0), it.get("trim_tail", 0))
+        wave_info[rec["breath"]] = (round(t0, 4), round(r * src_scale, 4),
+                                    int(round(it.get("trim_head", 0) * src_scale)), int(round(it.get("trim_tail", 0) * src_scale)))
     for k, col in enumerate(("Wave_T0", "Wave_Rate", "Wave_Trim_Head", "Wave_Trim_Tail")):
         breaths[col] = breaths["BreathNumber"].map({b: v[k] for b, v in wave_info.items()})
     for nm, pfx in (("Pressure", "P"), ("Flow", "F"), ("Volume", "V")):
@@ -1080,10 +1123,13 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
 
     # Breaths DataFrameにメタデータカラムを追加
     breaths["Fragmented"] = breaths["BreathNumber"].map(fragmented_flags).fillna(False).astype(bool)
-    breaths["Region_X_Start"] = breaths["BreathNumber"].map(region_x_start_map).fillna("")
-    breaths["Region_X_End"] = breaths["BreathNumber"].map(region_x_end_map).fillna("")
-    breaths["Sweep_Start"] = breaths["BreathNumber"].map(sweep_start_map).fillna("")
-    breaths["Sweep_End"] = breaths["BreathNumber"].map(sweep_end_map).fillna("")
+    # 画面の x は元の動画の画素で書く（アプリはキャプチャーの走査線などを元の動画の幅で出す）
+    def _src_px(m):
+        return {b: (x if src_scale == 1.0 else round(x * src_scale, 1)) for b, x in m.items()}
+    breaths["Region_X_Start"] = breaths["BreathNumber"].map(_src_px(region_x_start_map)).fillna("")
+    breaths["Region_X_End"] = breaths["BreathNumber"].map(_src_px(region_x_end_map)).fillna("")
+    breaths["Sweep_Start"] = breaths["BreathNumber"].map(_src_px(sweep_start_map)).fillna("")
+    breaths["Sweep_End"] = breaths["BreathNumber"].map(_src_px(sweep_end_map)).fillna("")
 
     # Alert列を設定
     breaths["Alert"] = breaths["BreathNumber"].map(alert_map).fillna("")
