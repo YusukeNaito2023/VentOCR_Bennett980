@@ -6,7 +6,7 @@ JPEGフレーム画像を指定すると、捜査線のX軸位置を返す。
 
 捜査線の検出原理:
   全3ROI(Pressure/Flow/Volume)で、グリッド線(H=90-130)を除外した
-  V_maxが閾値以下になる列が10px以上連続する帯 = 捜査線。
+  V_maxが閾値以下になる列が MIN_SWEEP_WIDTH px以上連続する帯 = 捜査線。
   幅が10pxを超える場合は左端から10pxの範囲を返す。
 
 使い方:
@@ -28,6 +28,9 @@ ROIS = [
 ROI_X = 520
 ROI_W = 2877
 
+# 捜査線の帯の最小幅（px）。4K の取り込みでは 11〜14px、1280x720 を 4K に拡大したものでは 8〜11px
+MIN_SWEEP_WIDTH = 7
+
 # 捜査線内のV_max上限（グリッド線除外後）
 VMAX_THRESH = 45
 
@@ -44,6 +47,26 @@ WAVE_H_MAX = 75
 WAVE_S_MIN = 80
 WAVE_V_MIN = 30
 
+# エンジンの座標・閾値はすべて 3840x2160 のフレームで決めてある
+REF_W, REF_H = 3840, 2160
+
+
+def to_reference_size(img):
+    """3840x2160 以外の 16:9 のフレーム（1280x720・1920x1080 など）を 3840x2160 に拡大する。
+    PB980 の画面をそのまま取り込んだ動画は解像度が違っても配置が同じなので、拡大すれば 4K の座標・閾値がそのまま使える。
+    16:9 でないもの（読めなかったものを含む）はそのまま返す。"""
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if (w, h) == (REF_W, REF_H) or abs(w * REF_H - h * REF_W) > 0.01 * w * REF_H:
+        return img
+    return cv2.resize(img, (REF_W, REF_H), interpolation=cv2.INTER_CUBIC)
+
+
+def read_frame(frame_path):
+    """フレーム画像を読み、3840x2160 にそろえる（to_reference_size）。読めなければ None。"""
+    return to_reference_size(cv2.imread(frame_path))
+
 
 def detect_sweep_x(frame_path):
     """
@@ -55,7 +78,7 @@ def detect_sweep_x(frame_path):
     Returns:
         int: 捜査線の開始X座標（絶対座標）。検出不可時は0。
     """
-    img = cv2.imread(frame_path)
+    img = read_frame(frame_path)
     if img is None:
         return 0
 
@@ -96,11 +119,11 @@ def detect_sweep_x(frame_path):
     if in_gap:
         groups.append((gs, ROI_W - 1))
 
-    # フィルタ: 幅>=10px、左側にV_max>閾値の列がある
+    # フィルタ: 幅>=MIN_SWEEP_WIDTH、左側にV_max>閾値の列がある
     valid = []
     for gs, ge in groups:
         width = ge - gs + 1
-        if width < 10:
+        if width < MIN_SWEEP_WIDTH:
             continue
         if gs < 5:
             continue
@@ -156,7 +179,7 @@ def is_settings_screen(frame_path):
     Returns:
         bool: 設定変更画面ならTrue
     """
-    img = cv2.imread(frame_path)
+    img = read_frame(frame_path)
     if img is None:
         return False
 

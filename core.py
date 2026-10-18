@@ -21,13 +21,14 @@ from tqdm import tqdm
 from easyocr import Reader
 from . import Settings
 from . import ExtractWaves as ew
+from .detect_sweep import read_frame, to_reference_size
 import cv2
 import re
 import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "1.3.0"
+ENGINE_VERSION = "1.3.1"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -153,7 +154,7 @@ def _get_roi_for_frame(key, frame_shape):
 def _load_color_frame(frames_dir, frame_index):
     """Load a color frame from disk by index."""
     path = os.path.join(frames_dir, f"frame_{frame_index:08d}.jpg")
-    return cv2.imread(path)
+    return read_frame(path)
 
 
 def initial_ocr(frames, total_frames, subfolder, settings={},
@@ -193,17 +194,11 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
     detected_resolution = None
     bm_frame_indices = []  # Track which frames have BreathMark=1
 
-    # BreathMark phase identification via reference histogram comparison.
-    # Pre-compute histograms for A/C/S Start/End reference images.
-    _ref_hists = {}  # {"A_Start": hist, "A_End": hist, ...}
+    # BreathMark phase identification via grayscale template matching (TM_CCOEFF_NORMED).
+    # 色ヒストグラムは取り込み機器による色合いの違い（2026-09 の 1280x720 の動画など）で見本と一致しなくなるため、
+    # 明るさ・コントラストの違いに強い正規化相互相関で、A/C/S Start/End の見本の形と比べる。
+    _ref_grays = {}  # {"A_Start": gray image, "A_End": gray image, ...}
     _bm_roi_size = None  # (w, h) for resizing references
-
-    def _compute_color_hist(img):
-        """Compute normalized 3D color histogram for comparison."""
-        hist = cv2.calcHist([img], [0, 1, 2], None, [16, 16, 16],
-                            [0, 256, 0, 256, 0, 256])
-        cv2.normalize(hist, hist)
-        return hist.flatten()
 
     with tqdm(total=total_frames, desc="Pass 1: BreathMark Detection") as pbar:
         if progress_callback is not None:
@@ -233,6 +228,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 "BM_S_End": 0.0,
             }
 
+            color_frame = to_reference_size(color_frame)  # 1280x720 などは 3840x2160 に拡大して 4K の座標で読む
             if color_frame is not None:
 
                 if frame_shape is None:
@@ -240,7 +236,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                     detected_resolution = (frame_shape[0], frame_shape[1])
                     print(f"[info] Detected resolution: {detected_resolution[1]}x{detected_resolution[0]}")
 
-                    # Load and pre-compute histograms for BreathMark references
+                    # Load BreathMark references (grayscale, resized to the ROI)
                     bm_roi_def = _get_roi_for_frame("BreathMark", frame_shape)
                     if bm_roi_def is not None:
                         _bm_roi_size = (bm_roi_def[2], bm_roi_def[3])  # (w, h)
@@ -249,21 +245,21 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                             ref_img = cv2.imread(ref_path)
                             if _bm_roi_size is not None:
                                 ref_img = cv2.resize(ref_img, _bm_roi_size)
-                            _ref_hists[name] = _compute_color_hist(ref_img)
-                    print(f"[BreathMark] Loaded {len(_ref_hists)} reference histograms: {list(_ref_hists.keys())}")
+                            _ref_grays[name] = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                    print(f"[BreathMark] Loaded {len(_ref_grays)} reference images: {list(_ref_grays.keys())}")
 
                 bm_roi = _get_roi_for_frame("BreathMark", color_frame.shape)
                 if bm_roi is not None:
                     bx, by, bw, bh = bm_roi
                     bm_color_roi = color_frame[by:by+bh, bx:bx+bw]
 
-                    # 毎フレーム: A/C/S_Start/End 6枚全てとヒストグラム比較
-                    if _ref_hists:
-                        roi_hist = _compute_color_hist(bm_color_roi)
+                    # 毎フレーム: A/C/S_Start/End 6枚全てとテンプレートマッチング
+                    if _ref_grays:
+                        roi_gray = cv2.cvtColor(bm_color_roi, cv2.COLOR_BGR2GRAY)
                         best_name = ""
                         best_score = -1.0
-                        for name, ref_hist in _ref_hists.items():
-                            score = cv2.compareHist(roi_hist, ref_hist, cv2.HISTCMP_CORREL)
+                        for name, ref_gray in _ref_grays.items():
+                            score = float(cv2.matchTemplate(roi_gray, ref_gray, cv2.TM_CCOEFF_NORMED)[0, 0])
                             row[f"BM_{name}"] = round(score, 4)
                             if score > best_score:
                                 best_score = score

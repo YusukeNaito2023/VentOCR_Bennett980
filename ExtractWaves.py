@@ -850,7 +850,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     Returns:
         (effective_breaths_count, breaths)
     """
-    from .detect_sweep import detect_sweep_x, is_settings_screen
+    from .detect_sweep import detect_sweep_x, is_settings_screen, read_frame
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -876,7 +876,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
 
     # ROI左端（パターン3で使用）
     sample_path = os.path.join(frames_root, f"frame_{int(frames['Frame'].iloc[0]):08d}.jpg")
-    sample_img = cv2.imread(sample_path)
+    sample_img = read_frame(sample_path)
     if sample_img is not None:
         rois = _get_waveform_rois(sample_img.shape)
         roi_x_left = max(rx for rx, ry, rw, rh in rois.values())
@@ -983,7 +983,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
             continue
 
         # 終了フレームから波形を抽出
-        img_end = cv2.imread(end_path)
+        img_end = read_frame(end_path)
         if img_end is None:
             alert_reasons.append("Frame Read Error")
             _write_empty_csv(csv_path)

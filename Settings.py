@@ -39,9 +39,10 @@ BREATHMARK_REFERENCES = {
     for name in ["A_Start", "A_End", "C_Start", "C_End", "S_Start", "S_End"]
 }
 
-# BreathMark ROI が見本画像のどれとも似ていないフレームを Abnormal とする（ヒストグラム相関）。
-# sample.mp4 では換気中は 0.94 以上、新患者設定画面・回路外れ（アイコンが消える）は 0.76〜0.81
-BREATHMARK_ABNORMAL_SCORE = 0.85
+# BreathMark ROI が見本画像のどれとも似ていないフレームを Abnormal とする（グレースケールのテンプレートマッチング）。
+# Bennett980_Sample.mp4（4K）ではアイコンがあるフレームは 0.99 以上、アイコンが消えたフレームは 0.53。
+# 2026-09 の 1280x720 の取り込み（4K に拡大して比べる）ではアイコンがあるフレームは 0.75〜0.86
+BREATHMARK_ABNORMAL_SCORE = 0.65
 
 # Fallback reference for abnormal detection
 REFERENCE_IMAGE_PATH = os.path.join(BASE_DIR, "sample_frame.jpg")
