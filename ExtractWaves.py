@@ -875,7 +875,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     Returns:
         (effective_breaths_count, breaths)
     """
-    from .detect_sweep import detect_sweep_x, is_settings_screen, read_frame, to_reference_size, source_scale
+    from .detect_sweep import detect_sweep_x_img, is_settings_screen_img, read_frame, to_reference_size, source_scale
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -918,6 +918,17 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     trim_on = (_config or {}).get("post_ocr", {}).get("trim_to_breath", True)
     new_screen_left = roi_x_left if trim_on else roi_x_left + int(round(NEW_SCREEN_LEAD_IN_SEC * early_rate))
 
+    # 読んだフレームを少しだけ覚えておく（1.3.3）。終了フレームは掃引線の検出・設定画面の判定・波形の抽出で、
+    # 次の呼吸では「開始フレームの1つ前」として使うので、同じ画像を何度も読み直さない
+    frame_cache = {}
+
+    def _frame(path):
+        if path not in frame_cache:
+            if len(frame_cache) >= 4:
+                frame_cache.pop(next(iter(frame_cache)))
+            frame_cache[path] = read_frame(path)
+        return frame_cache[path]
+
     # 波形データなしの場合に空CSVを書き出すヘルパー
     def _write_empty_csv(path):
         pd.DataFrame(columns=["X", "Pressure", "Flow", "Volume"]).to_csv(path, index=False)
@@ -952,15 +963,15 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         end_path = os.path.join(frames_root, f"frame_{end_frame_num:08d}.jpg")
 
         # 開始/終了フレームの捜査線位置を検出
-        sweep_start = detect_sweep_x(start_path)
-        sweep_end = detect_sweep_x(end_path)
+        sweep_start = detect_sweep_x_img(_frame(start_path))
+        sweep_end = detect_sweep_x_img(_frame(end_path))
 
         def _previous_sweep():
             """前の呼吸の最後のフレーム（= 開始フレームの1つ前）の sweep_x。前の呼吸で検出済みの値を使う。"""
             prev_end = sweep_end_map.get(breath_numbers[i - 1]) if i > 0 and prev_end_frame == start_frame_num - 1 else None
             if prev_end is None:
                 prev_path = os.path.join(frames_root, f"frame_{start_frame_num - 1:08d}.jpg")
-                prev_end = detect_sweep_x(prev_path) if os.path.isfile(prev_path) else 0  # engine_api 3 では isfile で確かめる
+                prev_end = detect_sweep_x_img(_frame(prev_path)) if os.path.isfile(prev_path) else 0  # engine_api 3 では isfile で確かめる
             return prev_end
 
         def _left_from_previous(x_left):
@@ -989,7 +1000,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         # パターン判定
         elif sweep_start == 0 and sweep_end == 0:
             # パターン1: 両方検出不可 — 設定変更画面かNo Sweepかを判別
-            if is_settings_screen(end_path):
+            if is_settings_screen_img(_frame(end_path)):
                 alert_reasons.append("Settings Change")
             else:
                 alert_reasons.append("No Sweep")
@@ -1025,7 +1036,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
             continue
 
         # 終了フレームから波形を抽出
-        img_end = read_frame(end_path)
+        img_end = _frame(end_path)
         if img_end is None:
             alert_reasons.append("Frame Read Error")
             _write_empty_csv(csv_path)

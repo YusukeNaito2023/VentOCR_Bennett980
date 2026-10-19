@@ -78,6 +78,30 @@ def to_reference_size_factor(w, h):
     return w / REF_W
 
 
+def reference_shape(img):
+    """to_reference_size したときのフレームの形（拡大するものは 3840x2160、しないものはそのまま）。"""
+    h, w = img.shape[:2]
+    return (REF_H, REF_W) + img.shape[2:] if to_reference_size_factor(w, h) != 1.0 else img.shape
+
+
+def crop_reference(img, x, y, w, h, margin=4):
+    """to_reference_size したフレームの (x, y, w, h) の領域。全画面を拡大せず、その領域だけを元のフレームから切り出して拡大する
+    （Pass 1 は毎フレーム読むので、1280x720 の全画面を 4K に拡大する時間を省く）。
+    拡大の倍率が整数（1280x720 は 3、1920x1080 は 2）なら、余白を付けて切り出せば位置がそろい、全画面を拡大して切り出したものと
+    ほぼ同じ画素になる（差は一部の画素で最大 1 階調）。整数でない倍率は全画面を拡大して切り出す。"""
+    sh, sw = img.shape[:2]
+    if to_reference_size_factor(sw, sh) == 1.0:
+        return img[y:y + h, x:x + w]
+    k = REF_W / sw
+    if abs(k - round(k)) > 1e-9 or abs(REF_H / sh - k) > 1e-9:
+        return to_reference_size(img)[y:y + h, x:x + w]
+    k = int(round(k))
+    x0, y0 = max(0, x // k - margin), max(0, y // k - margin)
+    x1, y1 = min(sw, -(-(x + w) // k) + margin), min(sh, -(-(y + h) // k) + margin)
+    up = cv2.resize(img[y0:y1, x0:x1], ((x1 - x0) * k, (y1 - y0) * k), interpolation=cv2.INTER_CUBIC)
+    return up[y - y0 * k:y - y0 * k + h, x - x0 * k:x - x0 * k + w]
+
+
 def read_frame(frame_path):
     """フレーム画像を読み、3840x2160 にそろえる（to_reference_size）。読めなければ None。"""
     return to_reference_size(cv2.imread(frame_path))
@@ -105,83 +129,53 @@ def detect_sweep_x_img(img):
     """3840x2160 にそろえたフレーム（BGR）から捜査線のX位置を検出する（detect_sweep_x と同じ。検出不可時は0）。"""
     if img is None or img.shape[0] < _BAND_Y1 or img.shape[1] < ROI_X + ROI_W:
         return 0
+    return detect_sweep_x_band(img[_BAND_Y0:_BAND_Y1, ROI_X:ROI_X + ROI_W])
 
-    band = cv2.cvtColor(img[_BAND_Y0:_BAND_Y1, ROI_X:ROI_X + ROI_W], cv2.COLOR_BGR2HSV)
 
+def detect_sweep_x_band(band):
+    """3つの波形ROIを含む帯（4K の座標で x = ROI_X〜ROI_X+ROI_W、y = _BAND_Y0〜_BAND_Y1。BGR）から捜査線のX位置を検出する。
+    HSV への変換は ROI の行だけ、列のまとまりは numpy で探す（1.3.3。結果は以前の detect_sweep_x_img と同じ）。"""
     # 全ROIで「グリッド除外V_max <= 閾値」の列を計算
     low_vmax = np.ones(ROI_W, dtype=bool)
+    v_rois = []
     for name, ry, rh in ROIS:
-        roi = band[ry - _BAND_Y0:ry - _BAND_Y0 + rh]
+        roi = cv2.cvtColor(band[ry - _BAND_Y0:ry - _BAND_Y0 + rh], cv2.COLOR_BGR2HSV)
+        h_ch, s_ch, v_ch = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
 
         # 異常フレーム判定: 各ROIで波形が最低100列必要
-        wave = (
-            (roi[:, :, 0] >= WAVE_H_MIN) & (roi[:, :, 0] <= WAVE_H_MAX) &
-            (roi[:, :, 1] >= WAVE_S_MIN) &
-            (roi[:, :, 2] >= WAVE_V_MIN)
-        )
-        if (wave.sum(axis=0) >= 1).sum() < MIN_WAVE_COLS_PER_ROI:
+        wave = (h_ch >= WAVE_H_MIN) & (h_ch <= WAVE_H_MAX) & (s_ch >= WAVE_S_MIN) & (v_ch >= WAVE_V_MIN)
+        if np.count_nonzero(wave.any(axis=0)) < MIN_WAVE_COLS_PER_ROI:
             return 0
 
         # グリッド線を除外してV_maxを計算
-        grid_mask = (roi[:, :, 0] >= GRID_H_MIN) & (roi[:, :, 0] <= GRID_H_MAX)
-        v_ch = roi[:, :, 2].copy()
-        v_ch[grid_mask] = 0
-        col_vmax = v_ch.max(axis=0)
-        low_vmax &= (col_vmax <= VMAX_THRESH)
+        v_grid = np.where((h_ch >= GRID_H_MIN) & (h_ch <= GRID_H_MAX), 0, v_ch)
+        v_rois.append(v_grid)
+        low_vmax &= v_grid.max(axis=0) <= VMAX_THRESH
 
-    # 連続する低V_max領域をグループ化
-    groups = []
-    in_gap = False
-    gs = 0
-    for i in range(ROI_W):
-        if low_vmax[i] and not in_gap:
-            gs = i
-            in_gap = True
-        elif (not low_vmax[i]) and in_gap:
-            groups.append((gs, i - 1))
-            in_gap = False
-    if in_gap:
-        groups.append((gs, ROI_W - 1))
-
-    # フィルタ: 幅>=MIN_SWEEP_WIDTH、左側にV_max>閾値の列がある
+    # 連続する低V_max領域（gs〜ge）を探し、幅>=MIN_SWEEP_WIDTH、左側にV_max>閾値の列があるものだけ残す
+    edges = np.diff(np.r_[0, low_vmax.astype(np.int8), 0])
     valid = []
-    for gs, ge in groups:
-        width = ge - gs + 1
-        if width < MIN_SWEEP_WIDTH:
+    for gs, ge in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1) - 1):
+        if ge - gs + 1 < MIN_SWEEP_WIDTH or gs < 5:
             continue
-        if gs < 5:
+        if low_vmax[max(0, gs - 5):gs].all():
             continue
-        left_ok = not low_vmax[max(0, gs - 5):gs].all()
-        if not left_ok:
-            continue
-        valid.append((gs, ge, width))
+        valid.append(int(gs))
 
     if not valid:
         return 0
 
     # 複数候補: 左側のV_maxが最も高いもの（アクティブ波形の直後）を選択
     if len(valid) == 1:
-        gs, ge, width = valid[0]
+        gs = valid[0]
     else:
-        best = None
-        best_left_v = 0
-        for gs, ge, width in valid:
-            left_region = []
-            for name, ry, rh in ROIS:
-                roi = band[ry - _BAND_Y0:ry - _BAND_Y0 + rh]
-                grid_mask = (roi[:, :, 0] >= GRID_H_MIN) & (roi[:, :, 0] <= GRID_H_MAX)
-                v_ch = roi[:, :, 2].copy()
-                v_ch[grid_mask] = 0
-                left_vmax = v_ch[:, max(0, gs - 20):gs].max()
-                left_region.append(left_vmax)
-            avg_left_v = np.mean(left_region)
+        gs, best_left_v = None, 0
+        for cand in valid:
+            avg_left_v = np.mean([v[:, max(0, cand - 20):cand].max() for v in v_rois])
             if avg_left_v > best_left_v:
-                best_left_v = avg_left_v
-                best = (gs, ge, width)
-        gs, ge, width = best
+                best_left_v, gs = avg_left_v, cand
 
-    sweep_start = gs + ROI_X
-    return sweep_start
+    return gs + ROI_X
 
 
 # 設定変更画面の判定用定数
@@ -203,7 +197,11 @@ def is_settings_screen(frame_path):
     Returns:
         bool: 設定変更画面ならTrue
     """
-    img = read_frame(frame_path)
+    return is_settings_screen_img(read_frame(frame_path))
+
+
+def is_settings_screen_img(img):
+    """is_settings_screen と同じ判定を、読み込んだフレーム（3840x2160 にそろえたもの）で行う。"""
     if img is None:
         return False
 

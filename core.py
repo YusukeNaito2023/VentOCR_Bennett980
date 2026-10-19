@@ -21,14 +21,15 @@ from tqdm import tqdm
 from easyocr import Reader
 from . import Settings
 from . import ExtractWaves as ew
-from .detect_sweep import read_frame, to_reference_size, source_scale, detect_sweep_x_img
+from .detect_sweep import (read_frame, source_scale, reference_shape, crop_reference, detect_sweep_x_band,
+                           ROI_X, ROI_W, _BAND_Y0, _BAND_Y1)
 import cv2
 import re
 import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "1.3.2"
+ENGINE_VERSION = "1.3.3"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -82,6 +83,15 @@ def _release_easyocr_file_lock(fd, lock_path):
             os.remove(lock_path)
     except Exception:
         pass
+
+
+_READERS = {}  # use_gpu → Reader。アプリのワーカーのプロセスは区間をまたいで使われるので、区間ごとに作り直さない
+
+
+def _get_reader(gpu_enabled):
+    if gpu_enabled not in _READERS:
+        _READERS[gpu_enabled] = _ensure_easyocr_reader_ready(gpu_enabled)
+    return _READERS[gpu_enabled]
 
 
 def _ensure_easyocr_reader_ready(gpu_enabled):
@@ -179,7 +189,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
     ocr_settings = settings.get("initial_ocr", {})
     gpu_enabled = ocr_settings.get("use_gpu", True)
 
-    reader = _ensure_easyocr_reader_ready(gpu_enabled)
+    reader = _get_reader(gpu_enabled)
     print(f"GPU:{gpu_enabled}")
 
     print(f"\n[Pass 1] Detecting BreathMarks (all {total_frames} frames)...")
@@ -197,7 +207,10 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
     # BreathMark phase identification via grayscale template matching (TM_CCOEFF_NORMED).
     # 色ヒストグラムは取り込み機器による色合いの違い（2026-09 の 1280x720 の動画など）で見本と一致しなくなるため、
     # 明るさ・コントラストの違いに強い正規化相互相関で、A/C/S Start/End の見本の形と比べる。
+    # 同じ大きさどうしの TM_CCOEFF_NORMED は「平均を引いたベクトルどうしの余弦」なので、見本 6 枚を平均を引いて正規化した行列にしておき、
+    # 毎フレーム 1 回の行列の積で 6 つのスコアを出す（1.3.3。cv2.matchTemplate を 6 回呼ぶより約 30 倍速い。差は 1e-6 程度）
     _ref_grays = {}  # {"A_Start": gray image, "A_End": gray image, ...}
+    _ref_names, _ref_mat = [], None
     _bm_roi_size = None  # (w, h) for resizing references
 
     with tqdm(total=total_frames, desc="Pass 1: BreathMark Detection") as pbar:
@@ -229,15 +242,18 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 "Sweep_X": np.nan,  # ペン先（捜査線）の x（元の動画の画素）。アプリのキャプチャーの走査線に使う。検出できなければ空
             }
 
-            scale = source_scale(color_frame)
-            color_frame = to_reference_size(color_frame)  # 1280x720 などは 3840x2160 に拡大して 4K の座標で読む
             if color_frame is not None:
-                sweep_x = detect_sweep_x_img(color_frame)
+                # 1280x720 などは 3840x2160 に拡大して 4K の座標で読む。全画面は拡大せず、掃引線の帯と BreathMark の領域だけを拡大する
+                scale = source_scale(color_frame)
+                ref_shape = reference_shape(color_frame)
+                sweep_x = 0
+                if ref_shape[0] >= _BAND_Y1 and ref_shape[1] >= ROI_X + ROI_W:
+                    sweep_x = detect_sweep_x_band(crop_reference(color_frame, ROI_X, _BAND_Y0, ROI_W, _BAND_Y1 - _BAND_Y0))
                 if sweep_x > 0:
                     row["Sweep_X"] = round(sweep_x * scale, 1)
 
                 if frame_shape is None:
-                    frame_shape = color_frame.shape
+                    frame_shape = ref_shape
                     detected_resolution = (frame_shape[0], frame_shape[1])
                     print(f"[info] Detected resolution: {detected_resolution[1]}x{detected_resolution[0]}")
 
@@ -251,20 +267,27 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                             if _bm_roi_size is not None:
                                 ref_img = cv2.resize(ref_img, _bm_roi_size)
                             _ref_grays[name] = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                    if _ref_grays:
+                        _ref_names = list(_ref_grays)
+                        _ref_mat = np.stack([_ref_grays[n].astype(np.float64).ravel() for n in _ref_names])
+                        _ref_mat -= _ref_mat.mean(axis=1, keepdims=True)
+                        _ref_mat /= np.linalg.norm(_ref_mat, axis=1, keepdims=True)
                     print(f"[BreathMark] Loaded {len(_ref_grays)} reference images: {list(_ref_grays.keys())}")
 
-                bm_roi = _get_roi_for_frame("BreathMark", color_frame.shape)
+                bm_roi = _get_roi_for_frame("BreathMark", ref_shape)
                 if bm_roi is not None:
-                    bx, by, bw, bh = bm_roi
-                    bm_color_roi = color_frame[by:by+bh, bx:bx+bw]
+                    bm_color_roi = crop_reference(color_frame, *bm_roi)
 
-                    # 毎フレーム: A/C/S_Start/End 6枚全てとテンプレートマッチング
-                    if _ref_grays:
-                        roi_gray = cv2.cvtColor(bm_color_roi, cv2.COLOR_BGR2GRAY)
+                    # 毎フレーム: A/C/S_Start/End 6枚全てとテンプレートマッチング（正規化相互相関）
+                    if _ref_grays and bm_color_roi.shape[:2] == next(iter(_ref_grays.values())).shape:
+                        g = cv2.cvtColor(bm_color_roi, cv2.COLOR_BGR2GRAY).astype(np.float64).ravel()
+                        g -= g.mean()
+                        norm = np.linalg.norm(g)
+                        scores = _ref_mat @ g / norm if norm > 0 else np.zeros(len(_ref_names))
                         best_name = ""
                         best_score = -1.0
-                        for name, ref_gray in _ref_grays.items():
-                            score = float(cv2.matchTemplate(roi_gray, ref_gray, cv2.TM_CCOEFF_NORMED)[0, 0])
+                        for name, score in zip(_ref_names, scores):
+                            score = float(score)
                             row[f"BM_{name}"] = round(score, 4)
                             if score > best_score:
                                 best_score = score
