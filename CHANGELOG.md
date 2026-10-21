@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 0.1.2 (2026-10-21)
+### 波形を画面の線のまま書き出す（平滑化・直線の補間を既定で切る）
+- 以前は設定に smoothing・imputation が無いと両方 ON とみなし、色で拾えない列を前後から直線で埋め、10px（4K。1280x720 では約 3 画素・約 0.08 秒）の
+  移動平均をかけていた。画面の下の端より下に外れた区間（Volume が負・Flow が目盛りの外）や、設定のポップアップで隠れた区間が直線になっていた
+- 既定を両方 OFF にし、拾えない点は空のまま残す（アプリは線を途切れて描く）。設定 post_ocr.smoothing・post_ocr.imputation（schema.py・engine_options.json）で入れ直せる
+- 確認（VentOCR 0.7.1、0.1.1 と同じ時刻の点どうしで比べて）:
+  - 17-19-23.mkv（1280x720、Alert の無い 574 呼吸）: 差の中央値 Pressure 0.01・Flow 0.34・Volume 2.1 mL、95% で Volume 17 mL 以内。
+    空になった点は Pressure 0.2%・Flow 0.1%・Volume 1.5%（ほぼすべて 0.1.1 で直線で埋めていた点）
+  - Bennett980_Sample.mp4（4K、Alert の無い 57 呼吸）: 差の中央値 Pressure 0・Flow 0.21・Volume 1.3 mL
+  - 呼吸の区切り・VTE・Ppeak・Mode・Alert・Frames.csv は同じ。区切りの合わせ込み（Wave_T0・Wave_Trim_*）と、目盛り（P/F/V_min・max）が一部の呼吸で少し変わる
+
 ## 0.1.1 (2026-10-21)
 ### 動画とエンジンが合っているかの確認（VentOCR 0.6.3 から）
 - Frames.csv に BM_Best_conf（BM_BestScore を 0〜1 に収めたもの）を追加。manifest.json に "frame_check_columns": ["BM_Best"]

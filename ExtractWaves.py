@@ -75,8 +75,10 @@ SWEEP_MAX_ROI_DEVIATION = 15  # ROI間のsweep line X位置の最大許容ずれ
 def set_config(settings):
     global _config, SMOOTHING, IMPUTATION
     _config = settings
-    SMOOTHING = settings.get("post_ocr", {}).get("smoothing", True)
-    IMPUTATION = settings.get("post_ocr", {}).get("imputation", True)
+    # 0.1.2: 既定は両方とも OFF（画面の線をそのまま残す）。以前は設定に無いと ON とみなし、色で拾えない列を前後から直線で埋め、
+    # 10px（4K）の移動平均をかけていた。設定 post_ocr.smoothing / imputation で入れ直せる
+    SMOOTHING = settings.get("post_ocr", {}).get("smoothing", False)
+    IMPUTATION = settings.get("post_ocr", {}).get("imputation", False)
 
 
 def _get_waveform_rois(frame_shape):

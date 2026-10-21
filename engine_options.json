@@ -6,6 +6,8 @@
   },
   "post_ocr": {
     "fps": 10,
-    "trim_to_breath": true
+    "trim_to_breath": true,
+    "smoothing": false,
+    "imputation": false
   }
 }

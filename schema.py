@@ -27,6 +27,16 @@ ENGINE_SETTINGS_SCHEMA = {
             "type": "bool",
             "default": True,
             "label": "Align waveform boundaries to inspiration onset"
+        },
+        "smoothing": {
+            "type": "bool",
+            "default": False,
+            "label": "Smooth waveforms (moving average)"
+        },
+        "imputation": {
+            "type": "bool",
+            "default": False,
+            "label": "Fill undetected waveform points by linear interpolation"
         }
     }
 }
