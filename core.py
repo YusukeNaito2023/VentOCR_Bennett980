@@ -29,7 +29,7 @@ import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "0.1.0"
+ENGINE_VERSION = "0.1.1"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -240,6 +240,9 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 "BM_S_Start": 0.0,
                 "BM_S_End": 0.0,
                 "Sweep_X": np.nan,  # ペン先（捜査線）の x（元の動画の画素）。アプリのキャプチャーの走査線に使う。検出できなければ空
+                # BM_BestScore を 0〜1 に収めたもの。アプリの先頭 50 フレームの確認（manifest の frame_check_columns）に使う。
+                # 0.5 未満は「読めなかった」とみなされる（PB980 の画面は 0.75 以上、ほかの機種の画面は 0.11 以下）
+                "BM_Best_conf": np.nan,
             }
 
             if color_frame is not None:
@@ -255,7 +258,11 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 if frame_shape is None:
                     frame_shape = ref_shape
                     detected_resolution = (frame_shape[0], frame_shape[1])
-                    print(f"[info] Detected resolution: {detected_resolution[1]}x{detected_resolution[0]}")
+                    src_h, src_w = color_frame.shape[:2]
+                    if (src_h, src_w) == detected_resolution:
+                        print(f"[info] Detected resolution: {src_w}x{src_h}")
+                    else:
+                        print(f"[info] Detected resolution: {src_w}x{src_h}（{detected_resolution[1]}x{detected_resolution[0]} に拡大して読む）")
 
                     # Load BreathMark references (grayscale, resized to the ROI)
                     bm_roi_def = _get_roi_for_frame("BreathMark", frame_shape)
@@ -294,6 +301,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                                 best_name = name
                         row["BM_Best"] = best_name
                         row["BM_BestScore"] = round(best_score, 4)
+                        row["BM_Best_conf"] = round(min(max(best_score, 0.0), 1.0), 4)
                         if best_score < Settings.BREATHMARK_ABNORMAL_SCORE:
                             row["Abnormal"] = 1
 
@@ -404,6 +412,9 @@ def _breath_modes(df):
     return letters.groupby(normal["BreathNumber"]).agg(lambda s: s.value_counts().idxmax())
 
 
+NO_SCREEN_ABNORMAL_RATIO = 0.9  # 呼吸の区切りが0個で、Abnormal のフレームがこの割合以上なら、PB980 の画面ではないとみなす（post_ocr）
+
+
 def post_ocr(df, Analyze_Id, user_ID, settings={}):
     """
     Post-process OCR DataFrame and generate breath-level summary.
@@ -425,6 +436,13 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
     if "Ppeak" in df.columns:
         df["Ppeak"] = pd.to_numeric(df["Ppeak"], errors="coerce")
     df["BreathMark"] = pd.to_numeric(df["BreathMark"], errors="coerce").fillna(0).astype(int)
+
+    # PB980 の画面でない動画（別の機種など）は、どのフレームも見本と似ず（Abnormal）、呼吸の区切りが1つも見つからない。
+    # そのまま進むと全体が呼吸1つの「完了」になるので、解析を失敗にする（区間ごとではなく全体で判定するので、設定画面が続く区間では止まらない）
+    abnormal = pd.to_numeric(df["Abnormal"], errors="coerce").fillna(0) if "Abnormal" in df.columns else pd.Series(0, index=df.index)
+    if len(df) and df["BreathMark"].sum() == 0 and abnormal.mean() >= NO_SCREEN_ABNORMAL_RATIO:
+        raise RuntimeError(f"PB980 の画面が見つかりません（呼吸の区切りが見つからず、{abnormal.mean() * 100:.0f}% のフレームで左上のアイコンが"
+                           "どの見本とも似ていません）。PB980 の画面を取り込んだ動画か、ほかの機種のエンジンを選んでいないかを確かめてください")
 
     # Breath detection: cumulative sum of BreathMark transitions
     df["BreathNumber"] = df["BreathMark"].cumsum()

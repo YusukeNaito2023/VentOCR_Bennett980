@@ -3,8 +3,8 @@
   "engine_api": 3,
   "display_name": "PB980",
   "developer": "VentOCR Developer Team",
-  "version": "0.1.0",
-  "ventocr_min": "0.5.5",
+  "version": "0.1.1",
+  "ventocr_min": "0.6.3",
   "description": "Puritan Bennett 980 ventilator OCR engine (Pressure / Flow / Volume waveforms, VTE)",
 
   "sample_video": "sample.mp4",
@@ -12,8 +12,9 @@
 
   "has_extract_waves": true,
   "frame_check": false,
+  "frame_check_columns": ["BM_Best"],
   "output_columns": {
-    "frames": ["Frame", "VTE", "Ppeak", "BreathMark", "BreathMark_char", "BM_Best", "Sweep_X"],
+    "frames": ["Frame", "VTE", "Ppeak", "BreathMark", "BreathMark_char", "BM_Best", "Sweep_X", "BM_Best_conf"],
     "breaths": ["BreathNumber", "Mode", "VTE", "VTE_raw", "Ppeak", "BreathMark_char", "Fragmented", "Alert"]
   },
 
