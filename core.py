@@ -1,10 +1,10 @@
 """
 Bennett 980 VentOCR Engine
-VTE（一回換気量）とBreathMark（呼吸境界のカラー反転検出）を解析する。
+Reads VTE (tidal volume) and the BreathMark (the breath phase icon at the top left that marks breath boundaries).
 
-2パス方式:
-- Pass 1: BreathMark検出（全フレーム、カラーヒストグラム比較）
-- Pass 2: VTE + BreathMark_char OCR（BreathMark間の中間フレームのみ）
+Two passes:
+- Pass 1: BreathMark detection (every frame, template matching against reference images)
+- Pass 2: VTE + BreathMark_char OCR (only frames between BreathMarks)
 
 Interface:
     initial_ocr(frames, total_frames, subfolder, settings, progress_callback, frames_dir)
@@ -29,7 +29,7 @@ import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "0.1.3"
+ENGINE_VERSION = "0.1.4"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -85,7 +85,7 @@ def _release_easyocr_file_lock(fd, lock_path):
         pass
 
 
-_READERS = {}  # use_gpu → Reader。アプリのワーカーのプロセスは区間をまたいで使われるので、区間ごとに作り直さない
+_READERS = {}  # use_gpu -> Reader. The app's worker processes are reused across segments, so the Reader is not recreated for each segment
 
 
 def _get_reader(gpu_enabled):
@@ -170,17 +170,17 @@ def _load_color_frame(frames_dir, frame_index):
 def initial_ocr(frames, total_frames, subfolder, settings={},
                 progress_callback=None, frames_dir=None):
     """
-    2パスOCR方式:
-    - Pass 1: BreathMark遷移検出（全フレーム、カラージェネレータから順次受け取り）
-    - Pass 2: VTE + BreathMark_char OCR（BreathMark間の中間フレーム、frames_dirからディスク読み込み）
+    Two-pass OCR:
+    - Pass 1: BreathMark transition detection (every frame, received one by one from the color frame generator)
+    - Pass 2: VTE + BreathMark_char OCR (frames between BreathMarks, read from disk in frames_dir)
 
     Args:
-        frames: カラーフレームのジェネレータ (BGR, numpy配列)。list化禁止。
+        frames: generator of color frames (BGR, numpy arrays). Do not convert to a list.
         total_frames: int
         subfolder: str
         settings: dict
         progress_callback: callable or None
-        frames_dir: str フレームJPEG保存ディレクトリ（ランダムアクセス用）
+        frames_dir: str folder of saved JPEG frames (for random access)
 
     Returns:
         pd.DataFrame with columns: Frame, VTE, VTE_raw, VTE_conf, BreathMark, BreathMark_raw, BreathMark_char
@@ -205,10 +205,10 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
     bm_frame_indices = []  # Track which frames have BreathMark=1
 
     # BreathMark phase identification via grayscale template matching (TM_CCOEFF_NORMED).
-    # 色ヒストグラムは取り込み機器による色合いの違い（2026-09 の 1280x720 の動画など）で見本と一致しなくなるため、
-    # 明るさ・コントラストの違いに強い正規化相互相関で、A/C/S Start/End の見本の形と比べる。
-    # 同じ大きさどうしの TM_CCOEFF_NORMED は「平均を引いたベクトルどうしの余弦」なので、見本 6 枚を平均を引いて正規化した行列にしておき、
-    # 毎フレーム 1 回の行列の積で 6 つのスコアを出す（1.3.3。cv2.matchTemplate を 6 回呼ぶより約 30 倍速い。差は 1e-6 程度）
+    # Color histograms stop matching the references when the capture device shifts the colors (e.g. the 1280x720 videos from 2026-09),
+    # so the shape of the A/C/S Start/End references is compared with normalized cross-correlation, which is robust to brightness and contrast.
+    # TM_CCOEFF_NORMED between images of the same size is the cosine between mean-subtracted vectors, so the 6 references are kept as a mean-subtracted, normalized matrix
+    # and one matrix product per frame gives the 6 scores (1.3.3; about 30x faster than calling cv2.matchTemplate 6 times; differences around 1e-6)
     _ref_grays = {}  # {"A_Start": gray image, "A_End": gray image, ...}
     _ref_names, _ref_mat = [], None
     _bm_roi_size = None  # (w, h) for resizing references
@@ -239,14 +239,14 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 "BM_C_End": 0.0,
                 "BM_S_Start": 0.0,
                 "BM_S_End": 0.0,
-                "Sweep_X": np.nan,  # ペン先（捜査線）の x（元の動画の画素）。アプリのキャプチャーの走査線に使う。検出できなければ空
-                # BM_BestScore を 0〜1 に収めたもの。アプリの先頭 50 フレームの確認（manifest の frame_check_columns）に使う。
-                # 0.5 未満は「読めなかった」とみなされる（PB980 の画面は 0.75 以上、ほかの機種の画面は 0.11 以下）
+                "Sweep_X": np.nan,  # x of the pen tip (sweep line) in original video pixels. Used for the sweep line in the app's capture view. Empty if not detected
+                # BM_BestScore clipped to 0-1. Used by the app's check of the first 50 frames (manifest frame_check_columns).
+                # Values below 0.5 count as "not read" (0.75 or higher on the PB980 screen, 0.11 or lower on other ventilators' screens)
                 "BM_Best_conf": np.nan,
             }
 
             if color_frame is not None:
-                # 1280x720 などは 3840x2160 に拡大して 4K の座標で読む。全画面は拡大せず、掃引線の帯と BreathMark の領域だけを拡大する
+                # Frames such as 1280x720 are upscaled to 3840x2160 and read in 4K coordinates. Only the sweep band and the BreathMark region are upscaled, not the whole frame
                 scale = source_scale(color_frame)
                 ref_shape = reference_shape(color_frame)
                 sweep_x = 0
@@ -262,7 +262,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                     if (src_h, src_w) == detected_resolution:
                         print(f"[info] Detected resolution: {src_w}x{src_h}")
                     else:
-                        print(f"[info] Detected resolution: {src_w}x{src_h}（{detected_resolution[1]}x{detected_resolution[0]} に拡大して読む）")
+                        print(f"[info] Detected resolution: {src_w}x{src_h} (read upscaled to {detected_resolution[1]}x{detected_resolution[0]})")
 
                     # Load BreathMark references (grayscale, resized to the ROI)
                     bm_roi_def = _get_roi_for_frame("BreathMark", frame_shape)
@@ -285,7 +285,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                 if bm_roi is not None:
                     bm_color_roi = crop_reference(color_frame, *bm_roi)
 
-                    # 毎フレーム: A/C/S_Start/End 6枚全てとテンプレートマッチング（正規化相互相関）
+                    # Every frame: template matching against all 6 A/C/S Start/End references (normalized cross-correlation)
                     if _ref_grays and bm_color_roi.shape[:2] == next(iter(_ref_grays.values())).shape:
                         g = cv2.cvtColor(bm_color_roi, cv2.COLOR_BGR2GRAY).astype(np.float64).ravel()
                         g -= g.mean()
@@ -305,7 +305,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                         if best_score < Settings.BREATHMARK_ABNORMAL_SCORE:
                             row["Abnormal"] = 1
 
-                        # BreathMark検出: _End → _Start 遷移で吸気開始を判定
+                        # BreathMark detection: an _End -> _Start transition marks the start of inspiration
                         if (prev_bm_best is not None
                                 and "_End" in prev_bm_best
                                 and "_Start" in best_name):
@@ -340,7 +340,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
             if progress_callback is not None:
                 progress_callback(current=i, total=len(bm_frame_indices) - 1, message="OCR at midpoints")
 
-            # OCR VTE: frames_dirからカラーJPEGを読み込み、グレースケール変換してOCR
+            # OCR VTE: read the color JPEG from frames_dir, convert to grayscale and run OCR
             mid_color_frame = _load_color_frame(frames_dir, midpoint) if frames_dir is not None else None
             if mid_color_frame is not None:
                 gray_frame = np.dot(mid_color_frame[..., :3], [0.114, 0.587, 0.299]).astype(np.uint8)
@@ -357,7 +357,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                     except Exception:
                         pass
 
-            # OCR Ppeak: 呼吸の終わり（次の BreathMark のフレーム）の表示がこの呼吸の値（吸気が終わると更新される）
+            # OCR Ppeak: the value shown at the end of the breath (the frame of the next BreathMark) belongs to this breath (it updates when inspiration ends)
             end_color_frame = _load_color_frame(frames_dir, bm2) if frames_dir is not None else None
             if end_color_frame is not None:
                 pp_roi = _get_roi_for_frame("Ppeak", end_color_frame.shape)
@@ -365,7 +365,7 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
                     x, y, w, h = pp_roi
                     gray = cv2.cvtColor(end_color_frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
                     try:
-                        # 大きな数値だけを採る（枠に入った見出しや単位の文字の切れ端を数字と読むことがある）
+                        # Take only the large number (fragments of the boxed label or the unit can be read as digits)
                         res = reader.readtext(gray, allowlist="0123456789")
                         res = sorted(res, key=lambda r: -(max(p[1] for p in r[0]) - min(p[1] for p in r[0])))[:1]
                         pp_value, pp_raw, pp_conf = _parse_ocr_result(res)
@@ -405,14 +405,14 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
 # ============================================================
 
 def _breath_modes(df):
-    """呼吸番号 → 換気モード（"A" / "C" / "S"）。正常フレームが無い呼吸は含まない。"""
+    """Breath number -> ventilation mode ("A" / "C" / "S"). Breaths without normal frames are not included."""
     normal = df[(pd.to_numeric(df["Abnormal"], errors="coerce").fillna(0) == 0)
                 & (df["BM_Best"].astype(str).str.len() > 0)]
     letters = normal["BM_Best"].astype(str).str[0]
     return letters.groupby(normal["BreathNumber"]).agg(lambda s: s.value_counts().idxmax())
 
 
-NO_SCREEN_ABNORMAL_RATIO = 0.9  # 呼吸の区切りが0個で、Abnormal のフレームがこの割合以上なら、PB980 の画面ではないとみなす（post_ocr）
+NO_SCREEN_ABNORMAL_RATIO = 0.9  # With no breath boundaries and at least this fraction of Abnormal frames, the video is not a PB980 screen (post_ocr)
 
 
 def post_ocr(df, Analyze_Id, user_ID, settings={}):
@@ -437,12 +437,12 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
         df["Ppeak"] = pd.to_numeric(df["Ppeak"], errors="coerce")
     df["BreathMark"] = pd.to_numeric(df["BreathMark"], errors="coerce").fillna(0).astype(int)
 
-    # PB980 の画面でない動画（別の機種など）は、どのフレームも見本と似ず（Abnormal）、呼吸の区切りが1つも見つからない。
-    # そのまま進むと全体が呼吸1つの「完了」になるので、解析を失敗にする（区間ごとではなく全体で判定するので、設定画面が続く区間では止まらない）
+    # Videos without the PB980 screen (other ventilators, etc.) match no reference in any frame (Abnormal), so no breath boundary is found.
+    # Continuing would "complete" the whole video as one breath, so the analysis fails (judged on the whole video, not per segment, so segments showing only the settings screen do not stop it)
     abnormal = pd.to_numeric(df["Abnormal"], errors="coerce").fillna(0) if "Abnormal" in df.columns else pd.Series(0, index=df.index)
     if len(df) and df["BreathMark"].sum() == 0 and abnormal.mean() >= NO_SCREEN_ABNORMAL_RATIO:
-        raise RuntimeError(f"PB980 の画面が見つかりません（呼吸の区切りが見つからず、{abnormal.mean() * 100:.0f}% のフレームで左上のアイコンが"
-                           "どの見本とも似ていません）。PB980 の画面を取り込んだ動画か、ほかの機種のエンジンを選んでいないかを確かめてください")
+        raise RuntimeError(f"PB980 screen not found (no breath boundaries; in {abnormal.mean() * 100:.0f}% of the frames the icon at the top left "
+                           "matches no reference). Check that the video shows the PB980 screen; for another ventilator, choose that ventilator's engine")
 
     # Breath detection: cumulative sum of BreathMark transitions
     df["BreathNumber"] = df["BreathMark"].cumsum()
@@ -467,8 +467,8 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
     if "Alert" not in df.columns:
         df["Alert"] = ""
 
-    # Abnormal列はinitial_ocrのPass 1で既にセット済み
-    # MeanDiff/StdDiff/HistCorrは互換性のためデフォルト値を追加
+    # The Abnormal column is already set in Pass 1 of initial_ocr
+    # MeanDiff/StdDiff/HistCorr get default values for compatibility
     if "Abnormal" not in df.columns:
         df["Abnormal"] = 0
     df["MeanDiff"] = 0.0
@@ -480,8 +480,8 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
     # Breath-level summary
     df_breaths = df.loc[df.groupby("BreathNumber")["Frame"].idxmin()].copy()
 
-    # 呼吸中に画面に表示されていたVTE（VTE_raw）は、1つ前の呼吸の値（呼気が終わるまでVTEは計算されないため）。
-    # そのため呼吸nのVTEは、呼吸n+1の表示値とする。最後の呼吸・次の呼吸の表示値が読めない呼吸は空。
+    # The VTE shown on screen during a breath (VTE_raw) is the previous breath's value (VTE is not computed until expiration ends).
+    # So the VTE of breath n is the value shown during breath n+1. Empty for the last breath and when the next breath's value cannot be read.
     displayed_vte = (
         df.groupby("BreathNumber")["VTE"]
         .apply(lambda s: s.dropna().iloc[-1] if not s.dropna().empty else np.nan)
@@ -489,8 +489,8 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
     )
     df_breaths["VTE"] = df_breaths["BreathNumber"].map(displayed_vte.shift(-1))
 
-    # 換気モード（A/C/S）: 呼吸中の正常フレームで最も多い BM_Best の文字。
-    # 吸気開始の1フレーム目だけ別の文字になることがあるため、BreathMarkのフレーム単独では決めない
+    # Ventilation mode (A/C/S): the most frequent BM_Best letter among the breath's normal frames.
+    # The first frame of inspiration can show a different letter, so the BreathMark frame alone does not decide it
     df_breaths["Mode"] = df_breaths["BreathNumber"].map(_breath_modes(df)).fillna("")
 
     print(f"[post_ocr] {len(df_frames)} frames, {len(df_breaths)} breaths")
@@ -520,7 +520,7 @@ def extract_waves(df_frames, df_breaths, frames_root, output_dir, user_ID,
         user_ID: str
         settings: dict from engine_options.json
         overwrite: bool
-        archive_dir: str path to archive directory (fields.txt書き出し先)
+        archive_dir: str path to archive directory (where fields.txt is written)
 
     Returns:
         (effective_breaths_count, df_breaths)
@@ -531,7 +531,7 @@ def extract_waves(df_frames, df_breaths, frames_root, output_dir, user_ID,
         overwrite=overwrite,
     )
 
-    # fields.txt をセクション形式で書き出す
+    # Write fields.txt in sections
     if archive_dir is not None:
         os.makedirs(archive_dir, exist_ok=True)
         fields_path = os.path.join(archive_dir, "fields.txt")

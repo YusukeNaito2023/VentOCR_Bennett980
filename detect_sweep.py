@@ -1,15 +1,15 @@
 """
-Bennett 980 捜査線（sweep line）検出ユーティリティ。
+Bennett 980 sweep line detection utility.
 
-JPEGフレーム画像を指定すると、捜査線のX軸位置を返す。
-検出できない場合は0を返す。
+Given a JPEG frame image, returns the X position of the sweep line.
+Returns 0 if it cannot be detected.
 
-捜査線の検出原理:
-  全3ROI(Pressure/Flow/Volume)で、グリッド線(H=90-130)を除外した
-  V_maxが閾値以下になる列が MIN_SWEEP_WIDTH px以上連続する帯 = 捜査線。
-  幅が10pxを超える場合は左端から10pxの範囲を返す。
+How the sweep line is detected:
+  In all three ROIs (Pressure/Flow/Volume), excluding grid lines (H=90-130),
+  a band of at least MIN_SWEEP_WIDTH consecutive columns whose V_max is at or below the threshold = the sweep line.
+  If the band is wider than 10 px, the range of 10 px from its left edge is returned.
 
-使い方:
+Usage:
   python detect_sweep.py <frame_path>
   python detect_sweep.py /opt/ventocr/app/temp/admin/Frames/00001/frame_00000461.jpg
 """
@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 
-# 3840x2160用ROI定義（X開始=520, 幅=2877で統一）
+# ROI definitions for 3840x2160 (X start = 520 and width = 2877 for all)
 ROIS = [
     ("Pressure", 269, 324),  # (y, h)
     ("Flow",     733, 324),
@@ -28,33 +28,33 @@ ROIS = [
 ROI_X = 520
 ROI_W = 2877
 
-# 捜査線の帯の最小幅（px）。4K の取り込みでは 11〜14px、1280x720 を 4K に拡大したものでは 8〜11px
+# Minimum width (px) of the sweep band. 11-14 px in 4K captures, 8-11 px in 1280x720 captures upscaled to 4K
 MIN_SWEEP_WIDTH = 7
 
-# 捜査線内のV_max上限（グリッド線除外後）
+# Upper limit of V_max inside the sweep band (after excluding grid lines)
 VMAX_THRESH = 45
 
-# グリッド線のH範囲（V_max計算から除外する）
+# H range of grid lines (excluded from the V_max calculation)
 GRID_H_MIN = 90
 GRID_H_MAX = 130
 
-# 各ROIで最低限の波形列数（異常フレーム判定）
+# Minimum number of waveform columns per ROI (abnormal frame check)
 MIN_WAVE_COLS_PER_ROI = 100
 
-# 波形ピクセルのHSV条件
+# HSV conditions for waveform pixels
 WAVE_H_MIN = 55
 WAVE_H_MAX = 75
 WAVE_S_MIN = 80
 WAVE_V_MIN = 30
 
-# エンジンの座標・閾値はすべて 3840x2160 のフレームで決めてある
+# All engine coordinates and thresholds are defined on 3840x2160 frames
 REF_W, REF_H = 3840, 2160
 
 
 def to_reference_size(img):
-    """3840x2160 以外の 16:9 のフレーム（1280x720・1920x1080 など）を 3840x2160 に拡大する。
-    PB980 の画面をそのまま取り込んだ動画は解像度が違っても配置が同じなので、拡大すれば 4K の座標・閾値がそのまま使える。
-    16:9 でないもの（読めなかったものを含む）はそのまま返す。"""
+    """Upscales 16:9 frames other than 3840x2160 (1280x720, 1920x1080, etc.) to 3840x2160.
+    Videos captured directly from the PB980 screen have the same layout at any resolution, so the 4K coordinates and thresholds apply after upscaling.
+    Frames that are not 16:9 (including unreadable ones) are returned unchanged."""
     if img is None:
         return None
     h, w = img.shape[:2]
@@ -64,31 +64,31 @@ def to_reference_size(img):
 
 
 def source_scale(img):
-    """元のフレームの画素 / 3840x2160 にそろえたフレームの画素（to_reference_size で拡大しないものは 1）。
-    エンジンが書き出す画素の値（Sweep_X・Sweep_Start など）は、これを掛けて元の動画の画素に戻す（アプリは元の動画の幅で位置を出す）。"""
+    """Pixels of the original frame / pixels of the frame scaled to 3840x2160 (1 for frames that to_reference_size does not upscale).
+    Pixel values written by the engine (Sweep_X, Sweep_Start, etc.) are multiplied by this to return to original video pixels (the app places positions by the original video width)."""
     if img is None:
         return 1.0
     return to_reference_size_factor(img.shape[1], img.shape[0])
 
 
 def to_reference_size_factor(w, h):
-    """幅 w・高さ h のフレームを to_reference_size で 3840x2160 にするときの、元 / 拡大後 の比（拡大しないものは 1）。"""
+    """Ratio original / upscaled when to_reference_size scales a w x h frame to 3840x2160 (1 if not upscaled)."""
     if (w, h) == (REF_W, REF_H) or abs(w * REF_H - h * REF_W) > 0.01 * w * REF_H:
         return 1.0
     return w / REF_W
 
 
 def reference_shape(img):
-    """to_reference_size したときのフレームの形（拡大するものは 3840x2160、しないものはそのまま）。"""
+    """Shape of the frame after to_reference_size (3840x2160 if upscaled, otherwise unchanged)."""
     h, w = img.shape[:2]
     return (REF_H, REF_W) + img.shape[2:] if to_reference_size_factor(w, h) != 1.0 else img.shape
 
 
 def crop_reference(img, x, y, w, h, margin=4):
-    """to_reference_size したフレームの (x, y, w, h) の領域。全画面を拡大せず、その領域だけを元のフレームから切り出して拡大する
-    （Pass 1 は毎フレーム読むので、1280x720 の全画面を 4K に拡大する時間を省く）。
-    拡大の倍率が整数（1280x720 は 3、1920x1080 は 2）なら、余白を付けて切り出せば位置がそろい、全画面を拡大して切り出したものと
-    ほぼ同じ画素になる（差は一部の画素で最大 1 階調）。整数でない倍率は全画面を拡大して切り出す。"""
+    """The (x, y, w, h) region of the frame after to_reference_size. Instead of upscaling the whole frame, only that region is cut from the original frame and upscaled
+    (Pass 1 reads every frame, so this saves the time to upscale the full 1280x720 frame to 4K).
+    When the scale factor is an integer (3 for 1280x720, 2 for 1920x1080), cutting with a margin keeps the positions aligned, giving almost the same pixels
+    as upscaling the whole frame and cutting (at most 1 level of difference on some pixels). Non-integer factors upscale the whole frame and cut."""
     sh, sw = img.shape[:2]
     if to_reference_size_factor(sw, sh) == 1.0:
         return img[y:y + h, x:x + w]
@@ -103,56 +103,56 @@ def crop_reference(img, x, y, w, h, margin=4):
 
 
 def read_frame(frame_path):
-    """フレーム画像を読み、3840x2160 にそろえる（to_reference_size）。読めなければ None。"""
+    """Reads a frame image and scales it to 3840x2160 (to_reference_size). None if it cannot be read."""
     return to_reference_size(cv2.imread(frame_path))
 
 
 def detect_sweep_x(frame_path):
     """
-    フレーム画像から捜査線のX位置を検出する。
+    Detects the X position of the sweep line in a frame image.
 
     Args:
-        frame_path: str, JPEGフレーム画像のパス
+        frame_path: str, path of the JPEG frame image
 
     Returns:
-        int: 捜査線の開始X座標（絶対座標）。検出不可時は0。
+        int: start X coordinate of the sweep line (absolute). 0 if not detected.
     """
     return detect_sweep_x_img(read_frame(frame_path))
 
 
-# 3つの波形ROIを含む帯（HSV への変換をこの範囲だけにする）
+# Band containing the three waveform ROIs (HSV conversion is limited to this range)
 _BAND_Y0 = min(ry for _, ry, _ in ROIS)
 _BAND_Y1 = max(ry + rh for _, ry, rh in ROIS)
 
 
 def detect_sweep_x_img(img):
-    """3840x2160 にそろえたフレーム（BGR）から捜査線のX位置を検出する（detect_sweep_x と同じ。検出不可時は0）。"""
+    """Detects the X position of the sweep line in a frame (BGR) scaled to 3840x2160 (same as detect_sweep_x; 0 if not detected)."""
     if img is None or img.shape[0] < _BAND_Y1 or img.shape[1] < ROI_X + ROI_W:
         return 0
     return detect_sweep_x_band(img[_BAND_Y0:_BAND_Y1, ROI_X:ROI_X + ROI_W])
 
 
 def detect_sweep_x_band(band):
-    """3つの波形ROIを含む帯（4K の座標で x = ROI_X〜ROI_X+ROI_W、y = _BAND_Y0〜_BAND_Y1。BGR）から捜査線のX位置を検出する。
-    HSV への変換は ROI の行だけ、列のまとまりは numpy で探す（1.3.3。結果は以前の detect_sweep_x_img と同じ）。"""
-    # 全ROIで「グリッド除外V_max <= 閾値」の列を計算
+    """Detects the X position of the sweep line in the band containing the three waveform ROIs (4K coordinates x = ROI_X to ROI_X+ROI_W, y = _BAND_Y0 to _BAND_Y1; BGR).
+    HSV conversion covers only the ROI rows, and column runs are found with numpy (1.3.3; same result as the former detect_sweep_x_img)."""
+    # Columns where "V_max excluding grid lines <= threshold" in all ROIs
     low_vmax = np.ones(ROI_W, dtype=bool)
     v_rois = []
     for name, ry, rh in ROIS:
         roi = cv2.cvtColor(band[ry - _BAND_Y0:ry - _BAND_Y0 + rh], cv2.COLOR_BGR2HSV)
         h_ch, s_ch, v_ch = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
 
-        # 異常フレーム判定: 各ROIで波形が最低100列必要
+        # Abnormal frame check: each ROI needs at least 100 waveform columns
         wave = (h_ch >= WAVE_H_MIN) & (h_ch <= WAVE_H_MAX) & (s_ch >= WAVE_S_MIN) & (v_ch >= WAVE_V_MIN)
         if np.count_nonzero(wave.any(axis=0)) < MIN_WAVE_COLS_PER_ROI:
             return 0
 
-        # グリッド線を除外してV_maxを計算
+        # V_max excluding grid lines
         v_grid = np.where((h_ch >= GRID_H_MIN) & (h_ch <= GRID_H_MAX), 0, v_ch)
         v_rois.append(v_grid)
         low_vmax &= v_grid.max(axis=0) <= VMAX_THRESH
 
-    # 連続する低V_max領域（gs〜ge）を探し、幅>=MIN_SWEEP_WIDTH、左側にV_max>閾値の列があるものだけ残す
+    # Find runs (gs to ge) of low V_max; keep those at least MIN_SWEEP_WIDTH wide with a column above the threshold on their left
     edges = np.diff(np.r_[0, low_vmax.astype(np.int8), 0])
     valid = []
     for gs, ge in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1) - 1):
@@ -165,7 +165,7 @@ def detect_sweep_x_band(band):
     if not valid:
         return 0
 
-    # 複数候補: 左側のV_maxが最も高いもの（アクティブ波形の直後）を選択
+    # Several candidates: choose the one with the highest V_max on its left (right after the active waveform)
     if len(valid) == 1:
         gs = valid[0]
     else:
@@ -178,7 +178,7 @@ def detect_sweep_x_band(band):
     return gs + ROI_X
 
 
-# 設定変更画面の判定用定数
+# Constants for detecting the settings screen
 _SETTINGS_CHECK_ROI_4K = (520, 269, 2877, 324)     # Pressure ROI (3840x2160)
 _SETTINGS_CHECK_ROI_FHD = (260, 130, 1474, 186)    # Pressure ROI (1920x1080)
 _SETTINGS_BRIGHT_V_THRESH = 50
@@ -187,28 +187,28 @@ _SETTINGS_BRIGHT_RATIO_THRESH = 0.3
 
 def is_settings_screen(frame_path):
     """
-    設定変更画面かどうかを判定する。
-    波形ROI内のV値（明度）分布から、ダイアログ表示による
-    異常な明るさを検出する。
+    Detects whether the frame is a settings screen,
+    from the V (brightness) distribution in the waveform ROI: a dialog
+    makes the area unusually bright.
 
     Args:
-        frame_path: str, JPEGフレーム画像のパス
+        frame_path: str, path of the JPEG frame image
 
     Returns:
-        bool: 設定変更画面ならTrue
+        bool: True for a settings screen
     """
     return is_settings_screen_img(read_frame(frame_path))
 
 
 def is_settings_screen_img(img):
-    """is_settings_screen と同じ判定を、読み込んだフレーム（3840x2160 にそろえたもの）で行う。"""
+    """Same check as is_settings_screen, on a frame already read (scaled to 3840x2160)."""
     if img is None:
         return False
 
     h, w = img.shape[:2]
     rx, ry, rw, rh = _SETTINGS_CHECK_ROI_4K if w == 3840 else _SETTINGS_CHECK_ROI_FHD
     roi_bgr = img[ry:ry+rh, rx:rx+rw]
-    # V = max(B, G, R) — HSV変換なしでV値を取得
+    # V = max(B, G, R), without HSV conversion
     v_channel = np.max(roi_bgr, axis=2)
     bright_ratio = np.mean(v_channel > _SETTINGS_BRIGHT_V_THRESH)
     return bright_ratio > _SETTINGS_BRIGHT_RATIO_THRESH

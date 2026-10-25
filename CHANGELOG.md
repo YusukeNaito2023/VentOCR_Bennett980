@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.1.4 (2026-10-25)
+### No Japanese in the engine (English only)
+- manifest.json: labels are plain English strings (app's label format): breath_values ("Mode (A / C / S)", "Ppeak (peak pressure)") and outputs.alerts (the {"ja", "en"} labels became the English string)
+- Exception and log messages in English ("PB980 screen not found ...", "Detected resolution: 1280x720 (read upscaled to 3840x2160)")
+- Code comments and docstrings, diff_viewer.py messages, the .gitignore comment and the Alert section of README.md in English
+- The analysis results do not change (only comments, messages, labels and ENGINE_VERSION)
+- Entries for earlier versions below are kept as they were (in Japanese)
+
 ## 0.1.3 (2026-10-25)
 ### 出力の宣言（manifest.json の outputs。ENGINE_API.md §8.1、Hamilton 0.2.4 に合わせる）
 - waves: Pressure（表示名 Paw、cmH2O、#d62728）・Flow（L/min、#1f77b4）・Volume（mL、#2ca02c）。縦軸は呼吸器の画面の目盛り（P_min〜P_max・F_min〜F_max・V_min〜V_max）

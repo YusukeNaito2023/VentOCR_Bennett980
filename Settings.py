@@ -20,7 +20,7 @@ ROI_BY_RESOLUTION = {
     (2160, 3840): {  # 3840x2160 (test3.mp4)
         "VTE":        [842, 56, 356, 150],
         "BreathMark": [0, 0, 344, 224],
-        "Ppeak":      [430, 64, 260, 122],   # 左上の「PPEAK」の数値（cmH2O）。上の「PEAK」・下の単位は含めない。波形の目盛りの推定に使う
+        "Ppeak":      [430, 64, 260, 122],   # The PPEAK value at the top left (cmH2O), excluding the "PEAK" label above and the unit below. Used to estimate the waveform scale
     },
 }
 
@@ -39,9 +39,9 @@ BREATHMARK_REFERENCES = {
     for name in ["A_Start", "A_End", "C_Start", "C_End", "S_Start", "S_End"]
 }
 
-# BreathMark ROI が見本画像のどれとも似ていないフレームを Abnormal とする（グレースケールのテンプレートマッチング）。
-# Bennett980_Sample.mp4（4K）ではアイコンがあるフレームは 0.99 以上、アイコンが消えたフレームは 0.53。
-# 2026-09 の 1280x720 の取り込み（4K に拡大して比べる）ではアイコンがあるフレームは 0.75〜0.86
+# Frames whose BreathMark ROI matches none of the reference images are marked Abnormal (grayscale template matching).
+# Bennett980_Sample.mp4 (4K): 0.99 or higher with the icon, 0.53 when the icon is gone.
+# 1280x720 captures from 2026-09 (upscaled to 4K before comparing): 0.75-0.86 with the icon
 BREATHMARK_ABNORMAL_SCORE = 0.65
 
 # Fallback reference for abnormal detection

@@ -21,16 +21,16 @@ ROIs = {
 
 Coordinates are measured from the top-left corner of the display image.
 
-## Alert（Breaths.csv の Alert 列）
+## Alert (the Alert column of Breaths.csv)
 
-| 値 | 意味 | 精度の評価 |
+| Value | Meaning | Accuracy evaluation |
 |---|---|---|
-| Fragment | 画面の右端で見切れた呼吸・録画の最初の呼吸（波形の一部だけ） | 除く |
-| Abnormal | 呼吸の印（左上のアイコン）が見本と似ていないフレームを含む（設定画面・回路外れなど） | 除く |
-| No Sweep | 掃引線が見つからず、波形を切り出せなかった | 除く |
-| Settings Change | 設定変更の画面で波形の欄が覆われた | 除く |
-| Invalid Range | 波形を切り出す範囲を決められなかった | 除く |
-| Empty Waveform | 切り出した波形が空だった | 除く |
-| Frame Read Error | 終了フレームの画像を読めなかった | 除く |
+| Fragment | Cut at the right edge of the screen, or the first breath of the recording (partial waveform) | Excluded |
+| Abnormal | Contains frames whose breath icon (top left) matches no reference (settings screen, disconnection, etc.) | Excluded |
+| No Sweep | Sweep line not found; waveform not extracted | Excluded |
+| Settings Change | The settings screen covered the waveform area | Excluded |
+| Invalid Range | Could not determine the waveform range | Excluded |
+| Empty Waveform | Extracted waveform was empty | Excluded |
+| Frame Read Error | Could not read the end frame image | Excluded |
 
-1つの呼吸に複数あるときは「, 」（カンマと空白）で区切る（例「Abnormal, Fragment」）。一覧は manifest.json の outputs.alerts にもある（ENGINE_API.md §8.1）。
+Several values in one breath are separated by ", " (comma and space), e.g. "Abnormal, Fragment". The list is also in outputs.alerts of manifest.json (ENGINE_API.md §8.1).
