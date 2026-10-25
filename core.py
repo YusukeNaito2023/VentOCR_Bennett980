@@ -29,7 +29,7 @@ import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "0.1.4"
+ENGINE_VERSION = "0.1.5"
 VENTOCR_TESTED = "0.5.5"
 
 
@@ -140,6 +140,59 @@ def _parse_ocr_result(result):
         cleaned_value = ""
 
     return cleaned_value, full_text, confidence_str
+
+
+VTE_PAD = 30               # px (4K) of background added around the VTE ROI before OCR (0.1.5)
+VTE_MIN_HEIGHT_FRAC = 0.6  # VTE digit boxes lower than this fraction of the tallest box are fragments (e.g. the bottom of the "VTE" label above the value)
+
+
+def _parse_vte(result):
+    """VTE (an integer in mL) from the EasyOCR result: digit boxes at least VTE_MIN_HEIGHT_FRAC of the tallest box, joined left to right without a separator.
+    _parse_ocr_result joins two numeric boxes with a decimal point (for decimal values), which turned "417" read as "41" + "7" into 41.7 and a label
+    fragment "5" + "379" into 5.379 (0.1.5). A "." inside one box is kept. Returns (value, raw text, confidences of the kept boxes)."""
+    raw_texts = [text.replace("_", ".").replace("I", "1") for _, text, _ in result]
+    full_text = ", ".join(raw_texts)
+    boxes = []
+    for (bbox, _, score), text in zip(result, raw_texts):
+        digits = re.sub(r"[^0-9.]", "", text)
+        if not re.search(r"\d", digits):
+            continue
+        xs, ys = [p[0] for p in bbox], [p[1] for p in bbox]
+        boxes.append((min(xs), max(ys) - min(ys), digits, score))
+    if not boxes:
+        return "", full_text, ""
+    tallest = max(b[1] for b in boxes)
+    kept = sorted((b for b in boxes if b[1] >= VTE_MIN_HEIGHT_FRAC * tallest), key=lambda b: b[0])
+    value = "".join(b[2] for b in kept).strip(".")
+    if not re.match(r"^\d+(\.\d+)?$", value):
+        value = ""
+    return value, full_text, ", ".join(f"{b[3]:.2f}" for b in kept)
+
+
+def _ocr_vte(reader, color_frame):
+    """(VTE, raw text, confidence) read from a color frame scaled to 3840x2160. Empty strings if the ROI is not available."""
+    gray_frame = np.dot(color_frame[..., :3], [0.114, 0.587, 0.299]).astype(np.uint8)
+    vte_roi = _get_roi_for_frame("VTE", gray_frame.shape)
+    if vte_roi is None:
+        return "", "", ""
+    x, y, w, h = vte_roi
+    roi = gray_frame[y:y+h, x:x+w]
+    # Pad with the background: the last digit touches the right edge of the ROI, and the OCR detector dropped it ("417" read as "41")
+    roi = cv2.copyMakeBorder(roi, VTE_PAD, VTE_PAD, VTE_PAD, VTE_PAD, cv2.BORDER_CONSTANT, value=int(np.median(roi)))
+    return _parse_vte(reader.readtext(roi))
+
+
+def _ocr_ppeak(reader, color_frame):
+    """(Ppeak, raw text, confidence) read from a color frame scaled to 3840x2160. Empty strings if the ROI is not available."""
+    pp_roi = _get_roi_for_frame("Ppeak", color_frame.shape)
+    if pp_roi is None:
+        return "", "", ""
+    x, y, w, h = pp_roi
+    gray = cv2.cvtColor(color_frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
+    # Take only the large number (fragments of the boxed label or the unit can be read as digits)
+    res = reader.readtext(gray, allowlist="0123456789")
+    res = sorted(res, key=lambda r: -(max(p[1] for p in r[0]) - min(p[1] for p in r[0])))[:1]
+    return _parse_ocr_result(res)
 
 
 # ============================================================
@@ -340,40 +393,27 @@ def initial_ocr(frames, total_frames, subfolder, settings={},
             if progress_callback is not None:
                 progress_callback(current=i, total=len(bm_frame_indices) - 1, message="OCR at midpoints")
 
-            # OCR VTE: read the color JPEG from frames_dir, convert to grayscale and run OCR
+            # OCR VTE: read the color JPEG from frames_dir, convert to grayscale and run OCR (_ocr_vte; 0.1.5 parses it as an integer)
             mid_color_frame = _load_color_frame(frames_dir, midpoint) if frames_dir is not None else None
             if mid_color_frame is not None:
-                gray_frame = np.dot(mid_color_frame[..., :3], [0.114, 0.587, 0.299]).astype(np.uint8)
-                vte_roi = _get_roi_for_frame("VTE", gray_frame.shape)
-                if vte_roi is not None:
-                    x, y, w, h = vte_roi
-                    roi = gray_frame[y:y+h, x:x+w]
-                    try:
-                        vte_result = reader.readtext(roi)
-                        vte_value, vte_raw, vte_conf = _parse_ocr_result(vte_result)
-                        df.loc[df["Frame"] == bm1, "VTE"] = vte_value
-                        df.loc[df["Frame"] == bm1, "VTE_raw"] = vte_raw
-                        df.loc[df["Frame"] == bm1, "VTE_conf"] = vte_conf
-                    except Exception:
-                        pass
+                try:
+                    vte_value, vte_raw, vte_conf = _ocr_vte(reader, mid_color_frame)
+                    df.loc[df["Frame"] == bm1, "VTE"] = vte_value
+                    df.loc[df["Frame"] == bm1, "VTE_raw"] = vte_raw
+                    df.loc[df["Frame"] == bm1, "VTE_conf"] = vte_conf
+                except Exception:
+                    pass
 
             # OCR Ppeak: the value shown at the end of the breath (the frame of the next BreathMark) belongs to this breath (it updates when inspiration ends)
             end_color_frame = _load_color_frame(frames_dir, bm2) if frames_dir is not None else None
             if end_color_frame is not None:
-                pp_roi = _get_roi_for_frame("Ppeak", end_color_frame.shape)
-                if pp_roi is not None:
-                    x, y, w, h = pp_roi
-                    gray = cv2.cvtColor(end_color_frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
-                    try:
-                        # Take only the large number (fragments of the boxed label or the unit can be read as digits)
-                        res = reader.readtext(gray, allowlist="0123456789")
-                        res = sorted(res, key=lambda r: -(max(p[1] for p in r[0]) - min(p[1] for p in r[0])))[:1]
-                        pp_value, pp_raw, pp_conf = _parse_ocr_result(res)
-                        df.loc[df["Frame"] == bm1, "Ppeak"] = pp_value
-                        df.loc[df["Frame"] == bm1, "Ppeak_raw"] = pp_raw
-                        df.loc[df["Frame"] == bm1, "Ppeak_conf"] = pp_conf
-                    except Exception:
-                        pass
+                try:
+                    pp_value, pp_raw, pp_conf = _ocr_ppeak(reader, end_color_frame)
+                    df.loc[df["Frame"] == bm1, "Ppeak"] = pp_value
+                    df.loc[df["Frame"] == bm1, "Ppeak_raw"] = pp_raw
+                    df.loc[df["Frame"] == bm1, "Ppeak_conf"] = pp_conf
+                except Exception:
+                    pass
 
             # OCR BreathMark character from color midpoint frame
             color_frame = mid_color_frame
@@ -412,6 +452,16 @@ def _breath_modes(df):
     return letters.groupby(normal["BreathNumber"]).agg(lambda s: s.value_counts().idxmax())
 
 
+def _vte_of_breaths(df_frames):
+    """Breath number -> VTE: the value shown during the next breath (the last value read in that breath; VTE is shown after expiration ends)."""
+    displayed = (
+        pd.to_numeric(df_frames["VTE"], errors="coerce").groupby(df_frames["BreathNumber"])
+        .apply(lambda s: s.dropna().iloc[-1] if not s.dropna().empty else np.nan)
+        .sort_index()
+    )
+    return displayed.shift(-1)
+
+
 NO_SCREEN_ABNORMAL_RATIO = 0.9  # With no breath boundaries and at least this fraction of Abnormal frames, the video is not a PB980 screen (post_ocr)
 
 
@@ -443,6 +493,23 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
     if len(df) and df["BreathMark"].sum() == 0 and abnormal.mean() >= NO_SCREEN_ABNORMAL_RATIO:
         raise RuntimeError(f"PB980 screen not found (no breath boundaries; in {abnormal.mean() * 100:.0f}% of the frames the icon at the top left "
                            "matches no reference). Check that the video shows the PB980 screen; for another ventilator, choose that ventilator's engine")
+
+    # 0.1.5: BreathMarks at segment boundaries. Pass 1 runs per segment and does not carry the last icon of the previous segment over,
+    # so a breath whose _End -> _Start transition falls on the first frame of a segment was missed (which breaths depended on where the segments were cut).
+    # Look at the whole sequence of BM_Best: where the segment changes between two frames, add the mark that Pass 1 could not see
+    df = df.sort_values("Frame", kind="stable").reset_index(drop=True)
+    df["BoundaryMark"] = 0
+    if "BM_Best" in df.columns and "source_file" in df.columns and len(df) > 1:
+        best = df["BM_Best"].astype(str)
+        prev = best.shift(1)
+        boundary = df["source_file"].ne(df["source_file"].shift(1))
+        boundary.iloc[0] = False
+        added = boundary & prev.str.contains("_End", na=False) & best.str.contains("_Start", na=False) & (df["BreathMark"] == 0)
+        df.loc[added, "BreathMark"] = 1
+        df.loc[added, "BoundaryMark"] = 1
+        df.loc[added, "BreathMark_raw"] = prev[added] + " -> " + best[added] + " (segment boundary)"
+        if added.any():
+            print(f"[post_ocr] {int(added.sum())} BreathMarks added at segment boundaries")
 
     # Breath detection: cumulative sum of BreathMark transitions
     df["BreathNumber"] = df["BreathMark"].cumsum()
@@ -482,12 +549,7 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
 
     # The VTE shown on screen during a breath (VTE_raw) is the previous breath's value (VTE is not computed until expiration ends).
     # So the VTE of breath n is the value shown during breath n+1. Empty for the last breath and when the next breath's value cannot be read.
-    displayed_vte = (
-        df.groupby("BreathNumber")["VTE"]
-        .apply(lambda s: s.dropna().iloc[-1] if not s.dropna().empty else np.nan)
-        .sort_index()
-    )
-    df_breaths["VTE"] = df_breaths["BreathNumber"].map(displayed_vte.shift(-1))
+    df_breaths["VTE"] = df_breaths["BreathNumber"].map(_vte_of_breaths(df))
 
     # Ventilation mode (A/C/S): the most frequent BM_Best letter among the breath's normal frames.
     # The first frame of inspiration can show a different letter, so the BreathMark frame alone does not decide it
@@ -501,6 +563,72 @@ def post_ocr(df, Analyze_Id, user_ID, settings={}):
 # ============================================================
 # extract_waves
 # ============================================================
+
+def _fill_unread_values(df_frames, df_breaths, frames_root, settings):
+    """0.1.5: read VTE and Ppeak for breaths that Pass 2 could not read, from the whole-video frames (frames_root = Frames/_flat).
+    Pass 2 runs per segment, so a breath whose start and next start are in different segments (it crosses a segment boundary) and a breath
+    added at a boundary by post_ocr were never read; their VTE (and the VTE of the previous breath, which is shown during this breath) was empty,
+    and which breaths were empty depended on where the segments were cut. Only those breaths are read (about 2 frames each), so the cost is small.
+    df_frames and df_breaths are updated in place (the app writes Frames.csv after extract_waves). Returns (frames read, seconds)."""
+    import time
+
+    t0 = time.perf_counter()
+    if "source_file" not in df_frames.columns or len(df_breaths) < 2:
+        return 0, 0.0
+    row_of = dict(zip(df_frames["Frame"], df_frames.index))
+    seg_of = dict(zip(df_frames["Frame"], df_frames["source_file"]))
+    starts = [int(f) for f in sorted(df_breaths["Frame"])]
+    targets = []
+    for f1, f2 in zip(starts[:-1], starts[1:]):
+        r1 = row_of.get(f1)
+        if r1 is None:
+            continue
+        added = "BoundaryMark" in df_frames.columns and df_frames.at[r1, "BoundaryMark"] == 1
+        if seg_of.get(f1) == seg_of.get(f2) and not added:
+            continue
+        need_vte = pd.isna(pd.to_numeric(df_frames.at[r1, "VTE"], errors="coerce"))
+        need_pp = "Ppeak" in df_frames.columns and pd.isna(pd.to_numeric(df_frames.at[r1, "Ppeak"], errors="coerce"))
+        if need_vte or need_pp:
+            targets.append((f1, f2, need_vte, need_pp))
+    if not targets:
+        return 0, 0.0
+    for frame in (df_frames, df_breaths):  # text columns (empty ones are read back as float)
+        for col in ("VTE_raw", "VTE_conf", "Ppeak_raw", "Ppeak_conf"):
+            if col in frame.columns and frame[col].dtype != object:
+                frame[col] = frame[col].astype(object)
+    reader = _get_reader(settings.get("initial_ocr", {}).get("use_gpu", True))
+    t_reader = time.perf_counter() - t0
+    n_frames = 0
+    for f1, f2, need_vte, need_pp in targets:
+        r1 = row_of[f1]
+        cols = {}
+        if need_vte:
+            img = read_frame(os.path.join(frames_root, f"frame_{(f1 + f2) // 2:08d}.jpg"))
+            n_frames += 1
+            if img is not None:
+                try:
+                    value, raw, conf = _ocr_vte(reader, img)
+                    cols.update(VTE=pd.to_numeric(value, errors="coerce"), VTE_raw=raw, VTE_conf=conf)
+                except Exception:
+                    pass
+        if need_pp:
+            img = read_frame(os.path.join(frames_root, f"frame_{f2:08d}.jpg"))
+            n_frames += 1
+            if img is not None:
+                try:
+                    value, raw, conf = _ocr_ppeak(reader, img)
+                    cols.update(Ppeak=pd.to_numeric(value, errors="coerce"), Ppeak_raw=raw, Ppeak_conf=conf)
+                except Exception:
+                    pass
+        for col, value in cols.items():
+            df_frames.at[r1, col] = value
+            if col != "VTE":  # the breath's VTE is recomputed below (it is the value shown during the next breath)
+                df_breaths.loc[df_breaths["Frame"] == f1, col] = value
+    df_breaths["VTE"] = df_breaths["BreathNumber"].map(_vte_of_breaths(df_frames))
+    elapsed = time.perf_counter() - t0
+    print(f"[extract_waves] read {n_frames} frames for {len(targets)} breaths that Pass 2 could not read "
+          f"({elapsed:.1f} s, of which loading the OCR model {t_reader:.1f} s)")
+    return n_frames, elapsed
 
 def extract_waves(df_frames, df_breaths, frames_root, output_dir, user_ID,
                   settings={}, overwrite=False, archive_dir=None):
@@ -526,6 +654,7 @@ def extract_waves(df_frames, df_breaths, frames_root, output_dir, user_ID,
         (effective_breaths_count, df_breaths)
     """
     ew.set_config(settings)
+    _fill_unread_values(df_frames, df_breaths, frames_root, settings)
     effective, df_breaths = ew.BreathsToCSVs(
         df_breaths, df_frames, frames_root, output_dir, user_ID,
         overwrite=overwrite,

@@ -3,7 +3,7 @@
   "engine_api": 3,
   "display_name": "PB980",
   "developer": "VentOCR Developer Team",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "ventocr_min": "0.6.3",
   "description": "Puritan Bennett 980 ventilator OCR engine (Pressure / Flow / Volume waveforms, VTE)",
   "sample_video": "sample.mp4",

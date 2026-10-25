@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## 0.1.5 (2026-10-25)
+### Results no longer depend on where the app cuts the segments
+Comparing the app's current form (CFR segments of 58-67 s) with the 0.8.0 form (direct decoding, exactly 60 s segments) on a 40-minute PB980 video
+showed that the differences came from the engine: Pass 1 and Pass 2 run per segment.
+- B. BreathMarks at segment boundaries (post_ocr): Pass 1 does not carry the last icon of the previous segment over, so a breath starting on the first
+  frame of a segment was missed. post_ocr now looks at the whole BM_Best sequence and adds the _End -> _Start mark where the segment changes
+  (column BoundaryMark = 1, BreathMark_raw "... (segment boundary)"). On the 40-minute video: 3 marks added in the current form and 1 in the 0.8.0 form,
+  exactly the breaths each form had missed; both forms now have the same breaths
+- A. VTE and Ppeak of breaths that Pass 2 could not read (extract_waves): a breath crossing a segment boundary (and a breath added by B) was never read,
+  so about 6% of VTE values were empty (42 of 682), and which ones depended on the segment boundaries. They are now read from the whole-video frames
+  (Frames/_flat): about 2 frames per breath (the midpoint for VTE, the next breath's first frame for Ppeak). The number of frames and the time are logged
+- C. VTE OCR: VTE is an integer, so digit boxes are no longer joined with a decimal point ("41" + "7" became 41.7, a label fragment "5" + "379" became 5.379).
+  Boxes lower than 60% of the tallest (fragments of the "VTE" label) are dropped and the rest are joined left to right. The ROI is padded with 30 px of
+  background before OCR, because the last digit touches the right edge and was dropped ("417" read as "41")
+- Check (2026-09-08 17-19-23.mkv, 40.6 min, 5 workers; current form = app-072 with CFR segments, 0.8.0 form = app-073 9a8d5bc with direct decoding):
+  - Both forms now give 685 breaths, all matched; VTE identical in 685/685 breaths; Ppeak identical in 684/685 (one "2" misread in the current form)
+  - Compared with 0.1.4: empty VTE 42 -> 2 and empty Ppeak 42 -> 2 in both forms (only the first/last breaths remain); broken VTE (decimals, digits dropped) 17 -> 7
+    and 15 -> 7, the remaining 7 being real small volumes (10-65 mL) of stacked breaths
+  - A read 86 frames for 43 breaths in 10.8 s (current form; 2.4 s of it loading the OCR model) and 82 frames for 41 breaths in 15.7 s (0.8.0 form; 3.2 s)
+  - Alerts still differ between the forms (Fragment 102 / 94, No Sweep 6 / 1): the sweep line is found more often in the cleaner frames of the 0.8.0 form
+
 ## 0.1.4 (2026-10-25)
 ### No Japanese in the engine (English only)
 - manifest.json: labels are plain English strings (app's label format): breath_values ("Mode (A / C / S)", "Ppeak (peak pressure)") and outputs.alerts (the {"ja", "en"} labels became the English string)
