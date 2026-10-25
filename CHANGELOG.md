@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.1.3 (2026-10-25)
+### 出力の宣言（manifest.json の outputs。ENGINE_API.md §8.1、Hamilton 0.2.4 に合わせる）
+- waves: Pressure（表示名 Paw、cmH2O、#d62728）・Flow（L/min、#1f77b4）・Volume（mL、#2ca02c）。縦軸は呼吸器の画面の目盛り（P_min〜P_max・F_min〜F_max・V_min〜V_max）
+- breath_values: Mode（換気モード）・VTE（mL）・Ppeak（cmH2O）・VTE_raw（表示名 VTE (displayed)。画面の表示は1つ前の呼吸の値）
+- alerts: Fragment・Abnormal・No Sweep・Settings Change・Invalid Range・Empty Waveform・Frame Read Error。どれも波形が欠ける・乱れる呼吸なので、
+  精度の評価から除く（exclude_from_accuracy）。1つの呼吸に複数のときは「, 」で区切る（例「Abnormal, Fragment」）
+- 解析の結果は変わらない（manifest.json と ENGINE_VERSION だけ）
+
 ## 0.1.2 (2026-10-21)
 ### 波形を画面の線のまま書き出す（平滑化・直線の補間を既定で切る）
 - 以前は設定に smoothing・imputation が無いと両方 ON とみなし、色で拾えない列を前後から直線で埋め、10px（4K。1280x720 では約 3 画素・約 0.08 秒）の

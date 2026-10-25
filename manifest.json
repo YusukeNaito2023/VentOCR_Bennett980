@@ -3,26 +3,173 @@
   "engine_api": 3,
   "display_name": "PB980",
   "developer": "VentOCR Developer Team",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "ventocr_min": "0.6.3",
   "description": "Puritan Bennett 980 ventilator OCR engine (Pressure / Flow / Volume waveforms, VTE)",
-
   "sample_video": "sample.mp4",
-  "supported_resolutions": ["3840x2160", "1920x1080", "1280x720"],
-
+  "supported_resolutions": [
+    "3840x2160",
+    "1920x1080",
+    "1280x720"
+  ],
   "has_extract_waves": true,
   "frame_check": false,
-  "frame_check_columns": ["BM_Best"],
+  "frame_check_columns": [
+    "BM_Best"
+  ],
   "output_columns": {
-    "frames": ["Frame", "VTE", "Ppeak", "BreathMark", "BreathMark_char", "BM_Best", "Sweep_X", "BM_Best_conf"],
-    "breaths": ["BreathNumber", "Mode", "VTE", "VTE_raw", "Ppeak", "BreathMark_char", "Fragmented", "Alert"]
+    "frames": [
+      "Frame",
+      "VTE",
+      "Ppeak",
+      "BreathMark",
+      "BreathMark_char",
+      "BM_Best",
+      "Sweep_X",
+      "BM_Best_conf"
+    ],
+    "breaths": [
+      "BreathNumber",
+      "Mode",
+      "VTE",
+      "VTE_raw",
+      "Ppeak",
+      "BreathMark_char",
+      "Fragmented",
+      "Alert"
+    ]
   },
-
-  "breath_summary": ["Mode", "VTE", "VTE_raw", "Ppeak"],
-  "labels": { "VTE_raw": "VTE (displayed)" },
-
+  "breath_summary": [
+    "Mode",
+    "VTE",
+    "VTE_raw",
+    "Ppeak"
+  ],
+  "labels": {
+    "VTE_raw": "VTE (displayed)"
+  },
   "accuracy": {
-    "VTE":        { "method": null, "threshold": null, "unit": "mL" },
-    "BreathMark": { "method": null, "threshold": null }
+    "VTE": {
+      "method": null,
+      "threshold": null,
+      "unit": "mL"
+    },
+    "BreathMark": {
+      "method": null,
+      "threshold": null
+    }
+  },
+  "outputs": {
+    "waves": [
+      {
+        "name": "Pressure",
+        "label": "Paw",
+        "unit": "cmH2O",
+        "color": "#d62728",
+        "scale": {
+          "min": "P_min",
+          "max": "P_max"
+        }
+      },
+      {
+        "name": "Flow",
+        "unit": "L/min",
+        "color": "#1f77b4",
+        "scale": {
+          "min": "F_min",
+          "max": "F_max"
+        }
+      },
+      {
+        "name": "Volume",
+        "unit": "mL",
+        "color": "#2ca02c",
+        "scale": {
+          "min": "V_min",
+          "max": "V_max"
+        }
+      }
+    ],
+    "breath_values": [
+      {
+        "name": "Mode",
+        "label": "換気モード（A / C / S）"
+      },
+      {
+        "name": "VTE",
+        "unit": "mL",
+        "format": "{:.0f}"
+      },
+      {
+        "name": "Ppeak",
+        "label": "Ppeak（ピーク圧）",
+        "unit": "cmH2O",
+        "format": "{:.0f}"
+      },
+      {
+        "name": "VTE_raw",
+        "label": "VTE (displayed)",
+        "unit": "mL",
+        "format": "{:.0f}"
+      }
+    ],
+    "alerts": [
+      {
+        "name": "Fragment",
+        "label": {
+          "ja": "画面の右端で見切れた呼吸・録画の最初の呼吸（波形の一部だけ）",
+          "en": "Cut at the right edge of the screen or the first breath of the recording (partial waveform)"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "Abnormal",
+        "label": {
+          "ja": "呼吸の印（左上のアイコン）が見本と似ていないフレームを含む（設定画面・回路外れなど）",
+          "en": "Contains frames whose breath icon matches no reference (settings screen, disconnection, etc.)"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "No Sweep",
+        "label": {
+          "ja": "掃引線が見つからず、波形を切り出せなかった",
+          "en": "Sweep line not found; waveform not extracted"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "Settings Change",
+        "label": {
+          "ja": "設定変更の画面（波形の欄が明るい画面で覆われた）",
+          "en": "Settings screen covered the waveform area"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "Invalid Range",
+        "label": {
+          "ja": "波形を切り出す範囲を決められなかった",
+          "en": "Could not determine the waveform range"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "Empty Waveform",
+        "label": {
+          "ja": "切り出した波形が空だった",
+          "en": "Extracted waveform was empty"
+        },
+        "exclude_from_accuracy": true
+      },
+      {
+        "name": "Frame Read Error",
+        "label": {
+          "ja": "終了フレームの画像を読めなかった",
+          "en": "Could not read the end frame image"
+        },
+        "exclude_from_accuracy": true
+      }
+    ]
   }
 }
