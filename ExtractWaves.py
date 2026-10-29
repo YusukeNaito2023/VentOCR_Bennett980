@@ -561,6 +561,37 @@ FLOW_WINDOW = 12            # length (px) of the window comparing the change in 
 # The shift with the smallest spread of "displayed value / waveform peak" across breaths is chosen automatically
 VALUE_SHIFTS = (0, -1)
 
+# 0.1.6: scale and zero from the axis labels (axis_labels.py). A band whose labels are read in the end frame gets its scale
+# (value per pixel) from the labels and its zero from the zero baseline (or the label "0"), and its crop covers its labels.
+# Breaths where a band is not read keep the estimate above, with the label rows of the last breath read as the top label and
+# zero rows, and with the values read in neighbouring breaths among the estimates (Alert "Axis").
+AXIS_MARGIN = 12            # reference px kept in the crop above the top label and below the bottom label
+ZERO_LINE_MAX_DIFF = 6.0    # reference px; the zero baseline gives the zero when it is this close to the label "0"
+                            # (the centroid of the label "0" is 1-3 px below the baseline)
+_AXIS_READER = None
+
+
+def _axis_reader():
+    """Reader of the axis labels (axis_labels.npz in the engine folder), or None when the templates are missing."""
+    global _AXIS_READER
+    if _AXIS_READER is None:
+        from .axis_labels import load_reader
+        _AXIS_READER = load_reader(os.path.dirname(os.path.abspath(__file__))) or False
+    return _AXIS_READER or None
+
+
+def _axis_rois(rois, axis_geo):
+    """Crop of each band, extended to cover its axis labels (axis_geo: {band: {"top_y", "bottom_y", ...}})."""
+    out = {}
+    for name, (rx, ry, rw, rh) in rois.items():
+        g = axis_geo.get(name)
+        if g:
+            y0 = min(ry, int(np.floor(g["top_y"] - AXIS_MARGIN)))
+            y1 = max(ry + rh, int(np.ceil(g["bottom_y"] + AXIS_MARGIN)))
+            ry, rh = y0, y1 - y0
+        out[name] = (rx, ry, rw, rh)
+    return out
+
 
 def _zero_y(hsv_img, roi, name, ratio):
     """y of the zero baseline (blue horizontal line). Default if not found."""
@@ -690,16 +721,36 @@ def _scale(name, top_value, g):
             "unit": SCALE_UNITS[name]}
 
 
+def _scale_read(name, read, g):
+    """Scale of a band whose axis labels were read (read: {"k": units / px, "top": top label value})."""
+    k = read["k"]
+    return {"min": round(-g["zero"] * k, 2), "max": round((g["h"] - g["zero"]) * k, 2), "top": read["top"],
+            "unit": SCALE_UNITS[name]}
+
+
+def _with_read(records, name, estimates):
+    """Estimates of the top label value, with the value read from the axis labels where the band was read (0.1.6)."""
+    return [r["geom"][name]["read"]["top"] if r["geom"][name].get("read") else e for r, e in zip(records, estimates)]
+
+
 def estimate_scales(records, rate):
     """{BreathNumber: {name: scale}}. records: dicts in breath order (breath, waves, geom, ppeak, vte, partial).
-    Partial breaths (cut at the right edge or containing abnormal frames) are not used for the estimate and take the scale of neighboring breaths."""
-    p_tops = _smooth_tops(_aligned_estimates(records, "Pressure", "ppeak"))
-    v_tops = _smooth_tops(_aligned_estimates(records, "Volume", "vte"))
-    f_tops = _smooth_tops([_flow_top(r, vt, rate) if vt else None for r, vt in zip(records, v_tops)])
+    Partial breaths (cut at the right edge or containing abnormal frames) are not used for the estimate and take the scale of neighboring breaths.
+    0.1.6: bands whose axis labels were read (geom[name]["read"]) take the scale from the labels; their values are also
+    among the estimates of the neighbouring breaths."""
+    p_tops = _smooth_tops(_with_read(records, "Pressure", _aligned_estimates(records, "Pressure", "ppeak")))
+    v_tops = _smooth_tops(_with_read(records, "Volume", _aligned_estimates(records, "Volume", "vte")))
+    f_tops = _smooth_tops(_with_read(records, "Flow", [_flow_top(r, vt, rate) if vt else None for r, vt in zip(records, v_tops)]))
     out = {}
     for r, pt, ft, vt in zip(records, p_tops, f_tops, v_tops):
-        out[r["breath"]] = {nm: _scale(nm, t, r["geom"][nm])
-                            for nm, t in (("Pressure", pt), ("Flow", ft), ("Volume", vt)) if t}
+        sc = {}
+        for nm, t in (("Pressure", pt), ("Flow", ft), ("Volume", vt)):
+            g = r["geom"][nm]
+            if g.get("read"):
+                sc[nm] = _scale_read(nm, g["read"], g)
+            elif t:
+                sc[nm] = _scale(nm, t, g)
+        out[r["breath"]] = sc
     return out
 
 
@@ -877,7 +928,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     Returns:
         (effective_breaths_count, breaths)
     """
-    from .detect_sweep import detect_sweep_x_img, is_settings_screen_img, read_frame, to_reference_size, source_scale
+    from .detect_sweep import detect_sweep_x_img, is_settings_screen_img, read_frame, to_reference_size, source_scale, REF_W, REF_H
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -914,6 +965,16 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     else:
         roi_x_left = 520
         roi_x_right = 520 + 2877
+
+    # Axis labels (0.1.6): label rows of the last breath read per band, starting from the first frame
+    reader = _axis_reader()
+
+    def _read_axis(img):
+        return reader.read(img) if reader is not None and img is not None and img.shape[:2] == (REF_H, REF_W) else {}
+
+    axis_geo = dict(_read_axis(sample_img))
+    axis_read = {nm: 0 for nm in SCALE_UNITS}
+    axis_tops = {nm: {} for nm in SCALE_UNITS}
 
     # Sweep speed (4K px/s) for cutting the first breath on a new screen, from the advance of the per-frame Sweep_X of Pass 1
     early_rate = _sweep_rate_from_frames(frames, fps, src_scale) or SWEEP_RATE_DEFAULT
@@ -1046,7 +1107,9 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
             alert_map[bn] = ", ".join(alert_reasons)
             continue
 
-        rois = _get_waveform_rois(img_end.shape)
+        axis = _read_axis(img_end)
+        axis_geo.update(axis)
+        rois = _axis_rois(_get_waveform_rois(img_end.shape), axis_geo)
         hsv_end = cv2.cvtColor(img_end, cv2.COLOR_BGR2HSV)
         waveforms = _extract_waveforms_in_range(hsv_end, rois, x_left, x_right)
 
@@ -1073,8 +1136,19 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         geom = {}
         for name, (rx, ry, rw, rh) in rois.items():
             bottom = ry + rh
-            geom[name] = {"h": rh, "zero": bottom - _zero_y(hsv_end, (rx, ry, rw, rh), name, ratio),
-                          "tick": bottom - SCALE_TICK_Y[name] * ratio}
+            zero_y, tick_y = _zero_y(hsv_end, (rx, ry, rw, rh), name, ratio), SCALE_TICK_Y[name] * ratio
+            g = axis_geo.get(name)
+            if g:   # label rows of this breath, or of the last breath read
+                if abs(zero_y - g["zero_y"]) > ZERO_LINE_MAX_DIFF:
+                    zero_y = g["zero_y"]
+                tick_y = g["top_y"]
+            geom[name] = {"h": rh, "zero": bottom - zero_y, "tick": bottom - tick_y}
+            if name in axis:
+                geom[name]["read"] = {"k": axis[name]["k"], "top": axis[name]["top"]}
+                axis_read[name] += 1
+                axis_tops[name][axis[name]["top"]] = axis_tops[name].get(axis[name]["top"], 0) + 1
+        if reader is not None and len(axis) < len(rois):
+            alert_reasons.append("Axis")
         # Position for the time of the first point (same clipping as _extract_waveforms_in_range)
         clip_left = max(x_left, max(r[0] for r in rois.values()))
         clip_right = min(x_right, min(r[0] + r[2] for r in rois.values()) - 1)
@@ -1094,6 +1168,11 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     # Estimate the scales, convert to physical units and write
     rate = float(np.median(sweep_rates)) if len(sweep_rates) >= 3 else SWEEP_RATE_DEFAULT
     scales = estimate_scales(records, rate) if records else {}
+    if reader is not None and records:
+        n = len(records)
+        tops = "; ".join(f"{nm} " + ", ".join(f"{t:g} ({c})" for t, c in sorted(axis_tops[nm].items())) for nm in SCALE_UNITS if axis_tops[nm])
+        print(f"[extract_waves] axis labels read in {n} breaths: " + ", ".join(f"{nm} {axis_read[nm]}" for nm in SCALE_UNITS)
+              + (f" (top labels: {tops})" if tops else "") + "; the other bands are estimated (Alert Axis)")
     for rec in records:
         sc = scales.get(rec["breath"], {})
         for nm, scale in sc.items():

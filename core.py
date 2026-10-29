@@ -29,7 +29,7 @@ import pandas as pd
 import numpy as np
 import os
 
-ENGINE_VERSION = "0.1.5"
+ENGINE_VERSION = "0.1.6"
 VENTOCR_TESTED = "0.5.5"
 
 

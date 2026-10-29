@@ -3,7 +3,7 @@
   "engine_api": 3,
   "display_name": "PB980",
   "developer": "VentOCR Developer Team",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "ventocr_min": "0.6.3",
   "description": "Puritan Bennett 980 ventilator OCR engine (Pressure / Flow / Volume waveforms, VTE)",
   "sample_video": "sample.mp4",
@@ -148,6 +148,11 @@
         "name": "Frame Read Error",
         "label": "Could not read the end frame image",
         "exclude_from_accuracy": true
+      },
+      {
+        "name": "Axis",
+        "label": "Axis labels not read for some waveform; that scale is estimated from VTE / PPEAK and the neighbouring breaths",
+        "exclude_from_accuracy": false
       }
     ]
   }

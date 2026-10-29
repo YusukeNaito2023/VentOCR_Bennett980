@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 0.1.6 (2026-10-29)
+### Waveform scales and zeros from the axis labels
+A reviewer found Flow larger than a reference by 5-24% with a zero offset of -5 to +1 L/min. Until 0.1.5 the scale of each
+waveform was estimated from VTE / PPEAK, and the rows of the top label and of the zero were fixed values measured on 980_sample.
+The 2026-09-08 captures are about 10 px (4K) lower than 980_sample and the zero baseline was often not found, so on
+2026-09-08 17-19-23.mkv Flow was x1.26 with -6 L/min, Volume x1.10-1.20 with about -40 mL, Paw x0.96, and some stacked breaths had Volume tops of 100-800.
+- axis_labels.py (new): the top, "0" and bottom labels of Paw, Flow and Volume are read in the end frame of every breath, each compared as a whole
+  with templates (axis_labels.npz) and located to a fraction of a pixel. Value per pixel comes from the labels, the zero from the zero baseline
+  when it is within 6 px of the label "0" (else the label). No extra decoding, no EasyOCR (about 2 s per hour of video)
+- The crop of each band covers its labels (plus 12 px), so expiratory Flow below about -66 L/min and Paw / Volume below zero are no longer cut off
+- Bands whose labels are not read keep the estimate, with the label rows of the last breath read and the neighbours' read values among the
+  estimates. Such breaths get the new Alert "Axis" (included in accuracy evaluation). The number of breaths read is logged
+- tools/build_axis_labels.py (new): builds the templates from frames of videos (read-only) and checks them. Templates: Paw 40 / 0 / -20,
+  Flow 80 / 0 / 80 and 120 / 0 / 120, Volume 1000 / 0 / -100, from the 2026-09-08 720p captures (7 videos, a frame a minute) and 980_sample (4K)
+- Check of the templates: 6 videos not used for them (180 frames) and the other 25 videos of the night (150 frames, every 5 min): all
+  three bands read in every frame, no label read wrong (RMS 1.2 or less for the same label, 15.6 or more for another; limits 6.0 and gap 4.0).
+  The scale did not change during any of the 32 recordings. Frames with a settings menu over the labels are not read
+- Check of the analyses (app main, 0.8.0 form, 5 workers):
+  - 2026-09-08 17-19-23.mkv (685 breaths): labels read in 684 of 684 breaths with waveforms, no Alert Axis. VTE / expiratory volume of the
+    Volume waveform 1.041 (IQR 1.027-1.051) in every part (0.1.5: 0.87-0.95 by part, 2.27 in BN 133-146); inspiratory Volume rise / Flow integral 0.975.
+    Breaths, VTE, VTE (displayed), Ppeak, Mode and Alert identical to 0.1.5; breath boundaries snapped to the start of inspiration moved in
+    162 breaths (median 0.04 s, at most 0.49 s) because Flow changed. 352 s (0.1.5: 404 s; extract_waves 52.8 s vs 50.9 s)
+  - 2026-09-08 18-30-03.mkv (720p, 501 breaths): read in 497 of 497, VTE / expiratory volume 1.036, Volume rise / Flow integral 0.964, 315 s
+  - 980_sample (4K, 89 breaths): read in 78 of 82; the other 4 (menu over the labels) have Alert Axis. VTE / expiratory volume 1.006,
+    Volume rise / Flow integral 0.998, 128 s
+
 ## 0.1.5 (2026-10-25)
 ### Results no longer depend on where the app cuts the segments
 Comparing the app's current form (CFR segments of 58-67 s) with the 0.8.0 form (direct decoding, exactly 60 s segments) on a 40-minute PB980 video
