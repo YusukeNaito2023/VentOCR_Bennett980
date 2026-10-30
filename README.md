@@ -25,7 +25,8 @@ Coordinates are measured from the top-left corner of the display image.
 
 The scale and the zero of each waveform are read from the axis labels at the left of each band, in the end frame of every breath
 (axis_labels.py, templates in axis_labels.npz). Each label (top, "0", bottom) is compared as a whole with the labels seen before and
-located to a fraction of a pixel; value per pixel comes from the labels and the zero from the zero baseline (or the label "0").
+located to a fraction of a pixel; value per pixel comes from the labels and the zero from the zero baseline, measured near the label "0"
+(0.1.7; the label "0" itself when the baseline is not seen).
 The crop of each band covers its labels, so expiratory Flow and negative Paw / Volume are no longer cut off.
 When the labels of a band are not read (a label not seen before, a menu over the labels), its scale is estimated as before 0.1.6
 (from VTE / PPEAK and the neighbouring breaths) and the breath gets the Alert "Axis". The templates are built with

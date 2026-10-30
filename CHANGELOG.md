@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 0.1.7 (2026-10-30)
+### Waveform zero from the zero baseline (Flow about 0.5 L/min too high on 720p)
+A reviewer found VentOCR Flow at a median +0.93 L/min where the reference is about 0, which made the integrated expiration smaller.
+On 720p captures the blue zero baseline is too dim for _zero_y, which fell back to a default row more than 6 px from the label "0",
+so the zero of the band was the label "0". The label "0" is 1.2 px (4K) below the baseline: Flow read +0.54 L/min high
+(the baseline was found in 12 of 30 frames of 2026-09-08 17-19-23.mkv), Volume +4 mL in about 30% of the frames; Paw used the baseline.
+The waveform pixel pick itself has no bias (against the centre of the trace in the original 720p pixels: -0.06 L/min).
+- _zero_line_near (new): for a band whose labels are read, the baseline is measured within 9 px of the label "0": in the columns free of
+  waveform, sweep line and text, the centroid of the row band brighter in the blue channel than its surroundings. If it is not found
+  (or is more than 6 px from the label "0"), the label "0" is used; the number of such breaths is logged. About 0.4 ms per band and breath
+- Check on frames (as the engine sees them): 2026-09-08 17-19-23.mkv and 18-30-03.mkv found in 90 of 90 band-frames each (Flow row sd 0.01 px),
+  980_sample in 73 of 75; where _zero_y found the baseline the two agree within 0.5 px
+- Check of the analysis of 2026-09-08 17-19-23.mkv (rerun): breaths, VTE, Ppeak, Mode and Alert identical to 0.1.6. Zero from the label "0" in
+  Pressure 0, Flow 0, Volume 13 of 684 breaths. Flow -0.53 L/min (median; F range -86.2..85.2 in all 684 breaths), Paw -0.08 cmH2O,
+  Volume +1.5 mL. Inspiratory Volume rise / Flow integral 0.975 -> 0.986; VTE / expiratory volume of the Volume waveform 1.041 (unchanged);
+  Wave_T0 moved in 14 breaths (0.03-0.07 s). The time of the run was not comparable (another heavy job on the same disk), but
+  BreathsToCSVs took 46 s against 36 s under about twice the load, and the new step adds about 1 s
+
 ## 0.1.6 (2026-10-29)
 ### Waveform scales and zeros from the axis labels
 A reviewer found Flow larger than a reference by 5-24% with a zero offset of -5 to +1 L/min. Until 0.1.5 the scale of each

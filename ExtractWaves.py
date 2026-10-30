@@ -568,6 +568,11 @@ VALUE_SHIFTS = (0, -1)
 AXIS_MARGIN = 12            # reference px kept in the crop above the top label and below the bottom label
 ZERO_LINE_MAX_DIFF = 6.0    # reference px; the zero baseline gives the zero when it is this close to the label "0"
                             # (the centroid of the label "0" is 1-3 px below the baseline)
+# The zero baseline of a band whose labels are read is measured near the label "0" (_zero_line_near): on 720p captures the baseline is
+# too dim for _zero_y, which fell back to the label "0", about 1 px (4K) below the baseline (Flow +0.44 L/min, Paw +0.3 cmH2O, Volume +3 mL)
+LINE_SEARCH = 9             # reference px searched above and below the label "0"
+LINE_MIN_BLUE = 4.0         # the baseline must be at least this much brighter in blue (B channel) than the rows around it
+LINE_MIN_CLEAN = 0.1        # at least this fraction of the columns must be free of waveform, sweep line and text
 _AXIS_READER = None
 
 
@@ -591,6 +596,37 @@ def _axis_rois(rois, axis_geo):
             ry, rh = y0, y1 - y0
         out[name] = (rx, ry, rw, rh)
     return out
+
+
+def _zero_line_near(img, hsv_img, roi, near):
+    """Row (reference px, sub-pixel) of the zero baseline within LINE_SEARCH of `near` (the label "0"), or None.
+    Columns crossed by a waveform, the sweep line or text are left out; in the others the baseline is the row band brighter in blue
+    (B channel) than the rows around it, and its row is the centroid of that band. (The background of the Paw and Flow bands of
+    980_sample is itself blue, so B - max(G, R) does not separate the line there.)"""
+    x, y, w, h = roi
+    y0, y1 = max(y, int(round(near)) - LINE_SEARCH), min(y + h, int(round(near)) + LINE_SEARCH + 1)
+    if y1 - y0 < 5:
+        return None
+    blue_ch, hs = img[y0:y1, x:x + w, 0].astype(np.float32), hsv_img[y0:y1, x:x + w]
+    hue = np.zeros(hs.shape[:2], dtype=bool)
+    for h_lo, h_hi in WAVEFORM_H_RANGES:
+        hue |= (hs[:, :, 0] >= h_lo) & (hs[:, :, 0] <= h_hi)
+    busy = (hue & (hs[:, :, 1] >= WAVEFORM_S_MIN) & (hs[:, :, 2] >= WAVEFORM_V_MIN)) | (hs[:, :, 2] >= 90)
+    clean = ~busy.any(axis=0)
+    if clean.sum() < LINE_MIN_CLEAN * w:
+        return None
+    prof = blue_ch[:, clean].mean(axis=1)
+    prof = prof - np.median(prof)
+    i = int(np.argmax(prof))
+    if prof[i] < LINE_MIN_BLUE:
+        return None
+    a = b = i
+    while a > 0 and prof[a - 1] >= 0.3 * prof[i]:
+        a -= 1
+    while b < len(prof) - 1 and prof[b + 1] >= 0.3 * prof[i]:
+        b += 1
+    p = prof[a:b + 1]
+    return y0 + a + float((np.arange(len(p)) * p).sum() / p.sum())
 
 
 def _zero_y(hsv_img, roi, name, ratio):
@@ -987,6 +1023,7 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
     axis_geo = dict(_read_axis(sample_img))
     axis_read = {nm: 0 for nm in SCALE_UNITS}
     axis_tops = {nm: {} for nm in SCALE_UNITS}
+    zero_from_label = {nm: 0 for nm in SCALE_UNITS}   # breaths whose zero is the label "0" (baseline not found near it)
 
     # Sweep speed (4K px/s) for cutting the first breath on a new screen, from the advance of the per-frame Sweep_X of Pass 1
     early_rate = _sweep_rate_from_frames(frames, fps, src_scale) or SWEEP_RATE_DEFAULT
@@ -1148,12 +1185,15 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         geom = {}
         for name, (rx, ry, rw, rh) in rois.items():
             bottom = ry + rh
-            zero_y, tick_y = _zero_y(hsv_end, (rx, ry, rw, rh), name, ratio), SCALE_TICK_Y[name] * ratio
             g = axis_geo.get(name)
             if g:   # label rows of this breath, or of the last breath read
-                if abs(zero_y - g["zero_y"]) > ZERO_LINE_MAX_DIFF:
+                zero_y = _zero_line_near(img_end, hsv_end, (rx, ry, rw, rh), g["zero_y"])
+                if zero_y is None or abs(zero_y - g["zero_y"]) > ZERO_LINE_MAX_DIFF:
                     zero_y = g["zero_y"]
+                    zero_from_label[name] += 1
                 tick_y = g["top_y"]
+            else:
+                zero_y, tick_y = _zero_y(hsv_end, (rx, ry, rw, rh), name, ratio), SCALE_TICK_Y[name] * ratio
             geom[name] = {"h": rh, "zero": bottom - zero_y, "tick": bottom - tick_y}
             if name in axis:
                 geom[name]["read"] = {"k": axis[name]["k"], "top": axis[name]["top"]}
@@ -1185,6 +1225,8 @@ def BreathsToCSVs(breaths, frames, frames_root, output_dir, user_id, overwrite=F
         tops = "; ".join(f"{nm} " + ", ".join(f"{t:g} ({c})" for t, c in sorted(axis_tops[nm].items())) for nm in SCALE_UNITS if axis_tops[nm])
         print(f"[extract_waves] axis labels read in {n} breaths: " + ", ".join(f"{nm} {axis_read[nm]}" for nm in SCALE_UNITS)
               + (f" (top labels: {tops})" if tops else "") + "; the other bands are estimated (Alert Axis)")
+        print("[extract_waves] zero baseline not found near the label \"0\" (zero from the label) in: "
+              + ", ".join(f"{nm} {zero_from_label[nm]}" for nm in SCALE_UNITS) + " breaths")
     for rec in records:
         sc = scales.get(rec["breath"], {})
         for nm, scale in sc.items():
