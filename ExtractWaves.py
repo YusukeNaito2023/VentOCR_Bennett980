@@ -770,6 +770,9 @@ ONSET_FLOW = 4.0        # Flow above this (L/min) is inspiratory flow
 ONSET_RUN_SEC = 0.06    # inspiratory flow must last at least this long
 ONSET_PEAK = 12.0       # the inspiration must reach at least this (L/min)
 QUIET_SEC = 0.06        # before the inspiration, at least this long without inspiratory flow
+BLIP_SEC = 0.06         # 0.1.6: a run above ONSET_FLOW this short that stays below ONSET_PEAK is noise, skipped when counting the quiet time
+                        # (with the scale read from the axis labels, the pre-trigger flow of 2-4 L/min sits at ONSET_FLOW and one noisy point
+                        # right before the rise hid the start of inspiration, so the flat lead-in of a new screen was not trimmed)
 ONSET_FRAC = 0.2        # from the point above this fraction of the inspiratory peak, go back to the foot of the rise
 EXP_FLOW = 4.0          # expiratory flow (L/min, at least this far below 0)
 BACKTRACK_TOL = 0.3     # when going back to the foot, keep going while the flow keeps decreasing by at least this (L/min)
@@ -786,6 +789,7 @@ def _inspiration_onsets(flow, rate):
     ins = fin & (np.nan_to_num(g) > ONSET_FLOW)
     run_min = max(2, int(round(ONSET_RUN_SEC * rate)))
     quiet_min = max(2, int(round(QUIET_SEC * rate)))
+    blip_max = max(1, int(round(BLIP_SEC * rate)))
     out = []
     i = 0
     while i < n:
@@ -796,9 +800,17 @@ def _inspiration_onsets(flow, rate):
         while j + 1 < n and ins[j + 1]:
             j += 1
         quiet, k = 0, i - 1
-        while k >= 0 and fin[k] and not ins[k]:
-            quiet += 1
-            k -= 1
+        while k >= 0 and fin[k]:
+            if not ins[k]:
+                quiet += 1
+                k -= 1
+                continue
+            b = k                     # a blip: short run above ONSET_FLOW below ONSET_PEAK, with flow below ONSET_FLOW before it
+            while b >= 0 and ins[b]:
+                b -= 1
+            if k - b > blip_max or np.nanmax(g[b + 1:k + 1]) >= ONSET_PEAK or b < 0 or not fin[b]:
+                break
+            k = b
         peak = np.nanmax(g[i:j + 1])
         if j - i + 1 >= run_min and peak >= ONSET_PEAK and quiet >= quiet_min:
             c = i + int(np.argmax(g[i:j + 1] >= ONSET_FRAC * peak))

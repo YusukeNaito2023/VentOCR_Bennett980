@@ -20,11 +20,24 @@ The 2026-09-08 captures are about 10 px (4K) lower than 980_sample and the zero 
 - Check of the analyses (app main, 0.8.0 form, 5 workers):
   - 2026-09-08 17-19-23.mkv (685 breaths): labels read in 684 of 684 breaths with waveforms, no Alert Axis. VTE / expiratory volume of the
     Volume waveform 1.041 (IQR 1.027-1.051) in every part (0.1.5: 0.87-0.95 by part, 2.27 in BN 133-146); inspiratory Volume rise / Flow integral 0.975.
-    Breaths, VTE, VTE (displayed), Ppeak, Mode and Alert identical to 0.1.5; breath boundaries snapped to the start of inspiration moved in
-    162 breaths (median 0.04 s, at most 0.49 s) because Flow changed. 352 s (0.1.5: 404 s; extract_waves 52.8 s vs 50.9 s)
+    Breaths, VTE, VTE (displayed), Ppeak, Mode and Alert identical to 0.1.5. 352 s (0.1.5: 404 s; extract_waves 52.8 s vs 50.9 s)
   - 2026-09-08 18-30-03.mkv (720p, 501 breaths): read in 497 of 497, VTE / expiratory volume 1.036, Volume rise / Flow integral 0.964, 315 s
   - 980_sample (4K, 89 breaths): read in 78 of 82; the other 4 (menu over the labels) have Alert Axis. VTE / expiratory volume 1.006,
     Volume rise / Flow integral 0.998, 128 s
+
+### Start of inspiration: short blips no longer hide it
+With the scale read from the labels, the pre-trigger flow of 2-4 L/min sits at ONSET_FLOW (4 L/min), and one noisy point above it right
+before the rise broke the quiet time required before an inspiration (QUIET_SEC). The start of inspiration was then not found, and the first
+breath on a new screen kept the flat end of expiration (about 0.5 s) that the PB980 draws at the left edge before inspiration.
+- _inspiration_onsets: a run above ONSET_FLOW of BLIP_SEC (0.06 s) or less that stays below ONSET_PEAK is skipped when counting the quiet time
+- Check on 2026-09-08 17-19-23.mkv (rerun, 359 s): breaths, VTE, Ppeak, Mode, Alert and the scales are identical to 0.1.6 without this change.
+  Wave_T0 compared with the screen trace (frames and waveforms):
+  - First breaths on a new screen: 6 that kept the flat lead-in without this change (BN 271, 398, 482, 517, 531, 657) now start within
+    0.04 s of the Paw rise, as in 0.1.5; 3 that kept it in 0.1.5 as well (BN 21, 36, 370) are trimmed now; the 5 that the new Flow scale
+    had already fixed (BN 81, 264, 461, 622, 629) are unchanged
+  - Against 0.1.5, 134 breaths moved (median 0.03 s, 26 by more than 0.1 s). Apart from the lead-ins above, the moves are between the
+    upward Flow zero crossing and the foot of the sharp rise (pre-trigger flow of 1-4 L/min, at most 18 mL, Paw rise below 1 cmH2O);
+    no boundary moved into the inspiration or into the expiration
 
 ## 0.1.5 (2026-10-25)
 ### Results no longer depend on where the app cuts the segments
